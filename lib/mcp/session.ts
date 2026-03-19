@@ -9,6 +9,22 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
+/**
+ * MCP JSON-RPC 单次请求超时（毫秒）。
+ * SDK 默认 60s；`uvx` 首次拉取 PyPI、冷启动 Python 时易触发 -32001 Request timed out。
+ */
+export function getMcpRequestTimeoutMs(): number {
+  const raw = process.env.MCP_REQUEST_TIMEOUT_MS?.trim();
+  if (!raw) return 180_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 10_000) return 180_000;
+  return Math.min(n, 600_000);
+}
+
+export function mcpRpcOptions(): { timeout: number } {
+  return { timeout: getMcpRequestTimeoutMs() };
+}
+
 export type McpStdioConfig = {
   command: string;
   args?: string[];
@@ -67,7 +83,7 @@ async function appendToolsFromClient(
   bindings: McpToolBinding[],
   openAiToolDefs: McpConnected['openAiToolDefs']
 ): Promise<void> {
-  const { tools } = await client.listTools();
+  const { tools } = await client.listTools(undefined, mcpRpcOptions());
   for (const tool of tools) {
     const exposedName = nextExposedName(tool.name, reserved);
     bindings.push({
@@ -114,7 +130,7 @@ async function addServersFromArray(
         version: '0.1.0',
       });
       try {
-        await client.connect(transport);
+        await client.connect(transport, mcpRpcOptions());
         await appendToolsFromClient(
           client,
           reserved,
@@ -149,7 +165,7 @@ async function addServersFromArray(
         version: '0.1.0',
       });
       try {
-        await client.connect(transport);
+        await client.connect(transport, mcpRpcOptions());
         await appendToolsFromClient(
           client,
           reserved,
@@ -319,7 +335,7 @@ export async function connectMcpStdio(): Promise<McpConnected | null> {
           stderr: 'pipe',
         });
         const client = new Client({ name: 'ai-studio', version: '0.1.0' });
-        await client.connect(transport);
+        await client.connect(transport, mcpRpcOptions());
         await appendToolsFromClient(
           client,
           reserved,
@@ -350,7 +366,7 @@ export async function connectMcpStdio(): Promise<McpConnected | null> {
     });
     const client = new Client({ name: 'ai-studio-remote', version: '0.1.0' });
     try {
-      await client.connect(transport);
+      await client.connect(transport, mcpRpcOptions());
       await appendToolsFromClient(
         client,
         reserved,

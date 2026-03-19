@@ -1,17 +1,46 @@
 import { HumanMessage, AIMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import { allTools } from '@/lib/tools';
-import { createLLM, validateModel } from '@/lib/models/factory';
+import { createLLM, isZhipuModel, validateModel } from '@/lib/models/factory';
+import { streamZhipuChatCompletion } from '@/lib/models/zhipu-chat-stream';
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
   connectMcpStdio,
   disconnectMcp,
   findMcpBinding,
   formatMcpToolResult,
   isMcpConfigured,
+  mcpRpcOptions,
   type McpConnected,
 } from '@/lib/mcp/session';
 
 export const runtime = 'nodejs';
+
+function messageContentToText(content: unknown): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((c: any) => {
+        if (typeof c === 'string') return c;
+        if (c?.text != null) return String(c.text);
+        if (c?.type === 'text' && c?.text) return String(c.text);
+        return '';
+      })
+      .join('');
+  }
+  return String(content);
+}
+
+function streamChunkToText(chunk: unknown): string {
+  if (chunk == null) return '';
+  const c = chunk as Record<string, unknown>;
+  // ChatGenerationChunk / 部分 Runnable 可能带顶层 text
+  if (typeof c.text === 'string' && c.text) return c.text;
+  const msg = c.message as { content?: unknown } | undefined;
+  if (msg && msg.content != null) return messageContentToText(msg.content);
+  return messageContentToText(c.content);
+}
 
 export async function POST(req: Request) {
   try {
@@ -31,7 +60,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const llm = createLLM(model, 0.7);
+    const temperature = 0.7;
+    const llm = createLLM(model, temperature);
 
     const zhipuTools = allTools.map((tool) => ({
       type: 'function' as const,
@@ -108,13 +138,17 @@ export async function POST(req: Request) {
 
               if (binding && mcp) {
                 try {
-                  const raw = await binding.client.callTool({
-                    name: binding.mcpName,
-                    arguments: (toolCall.args || {}) as Record<
-                      string,
-                      unknown
-                    >,
-                  });
+                  const raw = await binding.client.callTool(
+                    {
+                      name: binding.mcpName,
+                      arguments: (toolCall.args || {}) as Record<
+                        string,
+                        unknown
+                      >,
+                    },
+                    CallToolResultSchema,
+                    mcpRpcOptions()
+                  );
                   resultString = formatMcpToolResult(raw as any);
                   console.log(`✅ MCP 工具 ${binding.mcpName} 执行成功`);
                 } catch (err: any) {
@@ -147,19 +181,55 @@ export async function POST(req: Request) {
             }
 
             const messagesWithTools = [...messagesWithAI, ...toolMessages];
-            const finalStream = await llmWithTools.stream(messagesWithTools);
-            for await (const chunk of finalStream) {
-              const text =
-                typeof chunk.content === 'string'
-                  ? chunk.content
-                  : chunk.content.map((c: any) => c.text || '').join('');
-              if (text) controller.enqueue(encoder.encode(text));
+            let streamed = '';
+
+            // 智谱：LangChain ChatOpenAI 的 completions 流会跳过非 string 的 delta.content，导致无正文
+            if (isZhipuModel(model)) {
+              try {
+                for await (const text of streamZhipuChatCompletion(
+                  model,
+                  temperature,
+                  messagesWithTools
+                )) {
+                  if (text) {
+                    streamed += text;
+                    controller.enqueue(encoder.encode(text));
+                  }
+                }
+              } catch (e) {
+                console.warn('[chat] 智谱直连流式失败，将尝试 LangChain stream / invoke:', e);
+              }
+            }
+
+            if (!streamed.trim()) {
+              const finalStream = await llmWithTools.stream(messagesWithTools);
+              for await (const chunk of finalStream) {
+                const text = streamChunkToText(chunk);
+                if (text) {
+                  streamed += text;
+                  controller.enqueue(encoder.encode(text));
+                }
+              }
+            }
+
+            if (!streamed.trim()) {
+              console.warn(
+                '[chat] 工具后轮 stream 无正文，改用 invoke 拉取完整回复'
+              );
+              const finalMsg = await llmWithTools.invoke(messagesWithTools);
+              const fallback = messageContentToText(finalMsg.content);
+              if (fallback.trim()) {
+                controller.enqueue(encoder.encode(fallback));
+              } else if (toolMessages.length > 0) {
+                controller.enqueue(
+                  encoder.encode(
+                    `（模型未生成说明，以下为工具原始结果）\n\n${toolMessages.map((m) => m.content).join('\n\n---\n\n')}`
+                  )
+                );
+              }
             }
           } else {
-            const text =
-              typeof response.content === 'string'
-                ? response.content
-                : response.content.map((c: any) => c.text || '').join('');
+            const text = messageContentToText(response.content);
             if (text) controller.enqueue(encoder.encode(text));
           }
 

@@ -5,11 +5,13 @@ import { AgentConfig, TeamContext } from './types';
 import { createLLM } from '@/lib/models/factory';
 import { allTools } from '@/lib/tools';
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
   connectMcpStdio,
   disconnectMcp,
   findMcpBinding,
   formatMcpToolResult,
+  mcpRpcOptions,
   type McpConnected,
 } from '@/lib/mcp/session';
 
@@ -280,10 +282,14 @@ export class AgentTeam {
             let result: string;
             if (binding && mcp) {
               try {
-                const raw = await binding.client.callTool({
-                  name: binding.mcpName,
-                  arguments: (tc.args || {}) as Record<string, unknown>,
-                });
+                const raw = await binding.client.callTool(
+                  {
+                    name: binding.mcpName,
+                    arguments: (tc.args || {}) as Record<string, unknown>,
+                  },
+                  CallToolResultSchema,
+                  mcpRpcOptions()
+                );
                 result = formatMcpToolResult(raw as any);
                 console.log(`✅ [${agent.name}] MCP ${binding.mcpName} 成功`);
               } catch (err: any) {
