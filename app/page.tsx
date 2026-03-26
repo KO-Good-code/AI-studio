@@ -13,13 +13,44 @@ interface ModelInfo {
   size?: number;
 }
 
+export type ChatMessage = {
+  id: string;
+  role: string;
+  content: string;
+};
+
+function newMessageId(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `m-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+async function errorMessageFromResponse(response: Response): Promise<string> {
+  const raw = await response.text();
+  let msg = `请求失败 (${response.status})`;
+  try {
+    const j = JSON.parse(raw) as {
+      error?: string;
+      suggestion?: string;
+      issues?: unknown;
+    };
+    if (typeof j.error === 'string') msg = j.error;
+    if (j.suggestion) msg += ` — ${j.suggestion}`;
+    if (j.issues != null) msg += ` ${JSON.stringify(j.issues)}`;
+  } catch {
+    if (raw.trim()) msg = raw.slice(0, 500);
+  }
+  return msg;
+}
+
 export default function Home() {
   // 模型选择状态
   const [selectedModel, setSelectedModel] = useState('llama3.2')
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [modelsLoading, setModelsLoading] = useState(true)
   const [input, setInput] = useState('')
-  const [messages, setMessages] = useState<Array<{role: string, content: string}>>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   
@@ -94,32 +125,48 @@ export default function Home() {
     
     const userMessage = input.trim()
     setInput('') // 立即清空输入框
-    
-    // 添加用户消息
-    const newMessages = [...messages, { role: 'user', content: userMessage }]
+
+    const userMsg: ChatMessage = {
+      id: newMessageId(),
+      role: 'user',
+      content: userMessage,
+    }
+    const newMessages = [...messages, userMsg]
     setMessages(newMessages)
     setIsLoading(true)
     setError(null)
 
-    try {
-      // 🆕 根据模式选择不同的 API
-      const apiEndpoint = isTeamMode ? '/api/team' : '/api/chat'
-      const requestBody = isTeamMode
-        ? { messages: newMessages, model: selectedModel, teamId: selectedTeamId }
-        : { messages: newMessages, model: selectedModel }
+    const apiPayload =
+      isTeamMode
+        ? {
+            messages: newMessages.map(({ role, content }) => ({ role, content })),
+            model: selectedModel,
+            teamId: selectedTeamId,
+          }
+        : {
+            messages: newMessages.map(({ role, content }) => ({ role, content })),
+            model: selectedModel,
+          }
 
-      // 调用 API
+    try {
+      const apiEndpoint = isTeamMode ? '/api/team' : '/api/chat'
       const response = await fetch(apiEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify(apiPayload),
       })
 
       if (!response.ok) {
-        throw new Error('API request failed')
+        const errText = await errorMessageFromResponse(response)
+        throw new Error(errText)
       }
 
-      // 读取流式响应
+      const assistantId = newMessageId()
+      setMessages((prev) => [
+        ...prev,
+        { id: assistantId, role: 'assistant', content: '' },
+      ])
+
       const reader = response.body?.getReader()
       const decoder = new TextDecoder()
       let assistantMessage = ''
@@ -132,14 +179,17 @@ export default function Home() {
           const chunk = decoder.decode(value, { stream: true })
           assistantMessage += chunk
 
-          // 实时更新助手消息
-          setMessages([...newMessages, { role: 'assistant', content: assistantMessage }])
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: assistantMessage } : m
+            )
+          )
         }
       }
 
       setIsLoading(false)
-    } catch (err: any) {
-      setError(err)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err : new Error(String(err)))
       setIsLoading(false)
       console.error('Error:', err)
     }
@@ -300,7 +350,7 @@ export default function Home() {
           )}
 
           {messages.map((m, index) => (
-            <div key={index} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'} mb-6`}>
+            <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'} mb-6`}>
               <div className={`max-w-[85%] p-4 rounded-2xl shadow-md ${
                 m.role === 'user' 
                   ? 'bg-blue-600 text-white rounded-br-none' 

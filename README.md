@@ -21,7 +21,8 @@
 | 文档 | 说明 |
 |------|------|
 | [TEAM_GUIDE.md](./TEAM_GUIDE.md) | Team 模式使用与测试思路 |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 架构说明 |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Multi-Agent Team 架构详解 |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 工程目录、单聊 API 流程、约定速览 |
 | [GLM_INTEGRATION.md](./GLM_INTEGRATION.md) | 智谱 AI 配置 |
 | [OLLAMA_DYNAMIC_MODELS.md](./OLLAMA_DYNAMIC_MODELS.md) | Ollama 动态模型列表 |
 | [docs/MCP.md](./docs/MCP.md) | MCP 配置、多服务、自检 |

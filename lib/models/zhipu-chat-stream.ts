@@ -1,6 +1,7 @@
 import type { BaseMessage } from '@langchain/core/messages';
 import { convertMessagesToCompletionsMessageParams } from '@langchain/openai';
 import { getModelConfig } from './types';
+import { getZhipuChatCompletionsUrl, getZhipuDefaultHeaders } from './zhipuEnv';
 
 /** 智谱等接口在流式 delta 里可能返回 string 或 content part 数组 */
 export function extractOpenAiDeltaText(raw: unknown): string {
@@ -50,11 +51,13 @@ export async function* streamZhipuChatCompletion(
     ? Math.min(config.maxTokens, 8192)
     : 4096;
 
-  const res = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+  const extra = getZhipuDefaultHeaders();
+  const res = await fetch(getZhipuChatCompletionsUrl(), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
+      ...extra,
     },
     body: JSON.stringify({
       model: config.name,

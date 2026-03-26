@@ -2,6 +2,7 @@ import { ChatOllama } from '@langchain/ollama';
 import { ChatOpenAI } from '@langchain/openai';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { getModelConfig, isOllamaModel, isZhipuModel } from './types';
+import { getZhipuBaseUrl, getZhipuDefaultHeaders } from './zhipuEnv';
 
 export { isZhipuModel, isOllamaModel };
 
@@ -43,6 +44,7 @@ export function createLLM(modelId: string, temperature: number = 0.5): BaseChatM
       console.log('🌐 已启用智谱 AI 联网搜索功能');
     }
 
+    const zhipuHeaders = getZhipuDefaultHeaders();
     return new ChatOpenAI({
       apiKey: apiKey,
       model: config.name,
@@ -50,7 +52,8 @@ export function createLLM(modelId: string, temperature: number = 0.5): BaseChatM
       maxTokens: config.maxTokens,
       streaming: true,
       configuration: {
-        baseURL: 'https://open.bigmodel.cn/api/paas/v4/',
+        baseURL: getZhipuBaseUrl(),
+        ...(zhipuHeaders ? { defaultHeaders: zhipuHeaders } : {}),
       },
     }) as BaseChatModel;
   }

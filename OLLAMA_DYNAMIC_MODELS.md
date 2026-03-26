@@ -54,8 +54,7 @@ const allModels = [...predefinedModels, ...additionalModels]
 ├──────────────────────────────────────────┤
 │ 🦙 Llama 3.2 (本地) - 1.88 GB           │  ← 预定义
 │ 🇨🇳 Qwen 2.5 7B (本地) - 4.36 GB        │  ← 预定义
-│ ⚡ GLM-4-Flash (智谱 AI)                 │  ← 预定义（云端）
-│ 🚀 GLM-4-Plus (智谱 AI)                 │  ← 预定义（云端）
+│ 🌟 GLM-5 / GLM-4.7 … (智谱，多条)        │  ← 预定义（云端，见 types.ts）
 │ ─────────────────────────────────────    │
 │ 🦙 llama3.2:latest (本地) - 1.88 GB     │  ← 动态添加 ⭐
 │ 🦙 glm-4.6:cloud (本地)                 │  ← 动态添加 ⭐

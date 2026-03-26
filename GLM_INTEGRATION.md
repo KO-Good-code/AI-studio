@@ -29,15 +29,31 @@ new ChatOpenAI({
 📝 模型回复: 测试成功
 ```
 
+## 🌍 海外 API（api.z.ai）
+
+若 Key 与文档指向 **海外** 接入点，在 `.env.local` 中设置（与官方 curl 一致）：
+
+```bash
+ZHIPU_BASE_URL=https://api.z.ai/api/paas/v4/
+ZHIPU_ACCEPT_LANGUAGE=en-US,en
+ZHIPU_API_KEY=你的海外_Key
+```
+
+- **`ZHIPU_BASE_URL`**：须包含路径 `/api/paas/v4`，末尾 `/` 可有可无，应用内会自动补全。
+- **`ZHIPU_ACCEPT_LANGUAGE`**：可选；不设则请求里不带该头。
+- 国内默认仍为 `https://open.bigmodel.cn/api/paas/v4/`，不设 `ZHIPU_BASE_URL` 即可。
+
+控制台若列出 **`glm-5`** 等模型名，请在 `lib/models/types.ts` 的 `AVAILABLE_MODELS` 里把 `name` 改成与控制台一致（或新增一条模型配置）。
+
 ## 🚀 现在可以使用了！
 
 ### 1. 访问应用
 打开浏览器访问: **http://localhost:3001**
 
 ### 2. 选择模型
-在右上角的模型选择器中，选择：
-- **⚡ GLM-4-Flash (智谱 AI)** - 快速、性价比高
-- **🚀 GLM-4-Plus (智谱 AI)** - 旗舰模型
+在右上角的模型选择器中，选择智谱条目（完整列表见 `lib/models/types.ts`，与[模型概览](https://docs.bigmodel.cn/cn/guide/start/model-overview) 文本模型对齐），例如：
+- **GLM-5** — 旗舰
+- **GLM-4.7 / GLM-4.7-Flash** — 旗舰与免费高速档
 
 ### 3. 测试对话
 

@@ -2,16 +2,16 @@ import { HumanMessage, SystemMessage, AIMessage, ToolMessage } from '@langchain/
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { selectAgentsForTask } from './configs';
 import { AgentConfig, TeamContext } from './types';
-import { createLLM } from '@/lib/models/factory';
+import { createLLM, isZhipuModel } from '@/lib/models/factory';
+import { streamZhipuChatCompletion } from '@/lib/models/zhipu-chat-stream';
+import { messageContentToText } from '@/lib/langchain/messageText';
 import { allTools } from '@/lib/tools';
-import { zodToJsonSchema } from 'zod-to-json-schema';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import { toolsToOpenAiFunctions } from '@/lib/chat/openaiToolDefs';
+import { executeToolCall } from '@/lib/chat/executeToolCall';
+import { streamChunkToText } from '@/lib/langchain/messageText';
 import {
   connectMcpStdio,
   disconnectMcp,
-  findMcpBinding,
-  formatMcpToolResult,
-  mcpRpcOptions,
   type McpConnected,
 } from '@/lib/mcp/session';
 
@@ -29,7 +29,10 @@ export class AgentTeam {
   private llm: BaseChatModel;
   private context: TeamContext;
 
+  private modelId: string;
+
   constructor(model: string) {
+    this.modelId = model;
     this.llm = createLLM(model, 0.5);
 
     this.context = {
@@ -183,14 +186,7 @@ export class AgentTeam {
     yield `🔗 **本轮链式传递前序发言**: ${plan.chainPriorOutputs ? '是（后一位可读前一位本轮输出）' : '否（后一位仅看用户与历史对话）'}\n\n`;
     yield `✅ **本轮实际参与** (${agents.length} 人): ${agents.map((a) => `${a.emoji} ${a.name}`).join(' → ')}\n\n`;
 
-    const baseOpenAiTools = allTools.map((tool) => ({
-      type: 'function' as const,
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: zodToJsonSchema(tool.schema, { target: 'openApi3' }),
-      },
-    }));
+    const baseOpenAiTools = toolsToOpenAiFunctions(allTools);
 
     let mcp: McpConnected | null = null;
     try {
@@ -248,9 +244,10 @@ export class AgentTeam {
       );
 
       const systemPrompt =
-        `当前日期: ${today}\n\n${agent.systemPrompt}\n\n你可以使用工具来获取实时信息。如果用户的问题需要最新数据（新闻、股票、天气等），请调用相应工具。` +
+        `当前日期: ${today}\n\n${agent.systemPrompt}\n\n你可以使用工具来获取实时信息。` +
+        `A股工具：涨跌停/炸板名单用 aShareLimitList；OHLC行情/K线用 aShareQuote；个股基本面/PE/ROE/财报/股东/分红用 aShareStockInfo；新闻与泛搜索用 webSearch。` +
         (mcp
-          ? `\n\n带 \`mcp_\` 前缀的工具来自 MCP 生态（如读文件、目录列表等），按需调用。`
+          ? `\n\n带 \`mcp_\` 前缀的工具来自 MCP 生态；Yahoo/Finance 类多为单票、偏海外数据源，一般不用于沪深全市场涨跌停榜单。`
           : '') +
         `\n\n若用户用「它」「这只」「上面」「刚才」「对应」等指代，请结合【此前对话记录】推断具体指什么（如股票代码、产品名），不要无故要求用户重复已说过的信息。`;
 
@@ -278,71 +275,40 @@ export class AgentTeam {
           ];
 
           for (const tc of response.tool_calls) {
-            const binding = mcp ? findMcpBinding(mcp.bindings, tc.name) : undefined;
-            let result: string;
-            if (binding && mcp) {
-              try {
-                const raw = await binding.client.callTool(
-                  {
-                    name: binding.mcpName,
-                    arguments: (tc.args || {}) as Record<string, unknown>,
-                  },
-                  CallToolResultSchema,
-                  mcpRpcOptions()
-                );
-                result = formatMcpToolResult(raw as any);
-                console.log(`✅ [${agent.name}] MCP ${binding.mcpName} 成功`);
-              } catch (err: any) {
-                result = `MCP 工具失败: ${err.message}`;
-                console.error(`❌ [${agent.name}] MCP ${binding.mcpName}:`, err.message);
-              }
-            } else {
-              const tool = allTools.find((t) => t.name === tc.name);
-              if (!tool) {
-                result = `工具 ${tc.name} 不存在`;
-              } else {
-                try {
-                  const raw = await tool.func(tc.args);
-                  result = typeof raw === 'string' ? raw : JSON.stringify(raw);
-                  console.log(`✅ [${agent.name}] 工具 ${tc.name} 执行成功`);
-                } catch (err: any) {
-                  result = `工具执行失败: ${err.message}`;
-                  console.error(`❌ [${agent.name}] 工具 ${tc.name} 失败:`, err.message);
-                }
-              }
-            }
+            const result = await executeToolCall(
+              {
+                name: tc.name,
+                id: tc.id,
+                args: (tc.args ?? {}) as Record<string, unknown>,
+              },
+              mcp,
+              { label: `[${agent.name}]` }
+            );
             msgs.push(
               new ToolMessage({ content: result, tool_call_id: tc.id || '' })
             );
           }
 
-          const finalStream = await llmWithTools.stream(msgs);
-          for await (const chunk of finalStream) {
-            const text =
-              typeof chunk.content === 'string'
-                ? chunk.content
-                : chunk.content.map((c: any) => c.text || '').join('');
-            if (text) {
-              agentResponse += text;
-              yield text;
-            }
-          }
+          const toolMsgContents = msgs
+            .filter((m: unknown) => m instanceof ToolMessage)
+            .map((m: ToolMessage) => String(m.content));
+
+          agentResponse += yield* this.streamWithFallback(
+            llmWithTools,
+            msgs,
+            agent.name,
+            toolMsgContents
+          );
         } else {
-          const stream = await llmWithTools.stream([
+          const plainMsgs = [
             new SystemMessage(systemPrompt),
             new HumanMessage(fullPrompt),
-          ]);
-
-          for await (const chunk of stream) {
-            const text =
-              typeof chunk.content === 'string'
-                ? chunk.content
-                : chunk.content.map((c: any) => c.text || '').join('');
-            if (text) {
-              agentResponse += text;
-              yield text;
-            }
-          }
+          ];
+          agentResponse += yield* this.streamWithFallback(
+            llmWithTools,
+            plainMsgs,
+            agent.name
+          );
         }
 
         this.context.agentResponses.push({
@@ -415,6 +381,83 @@ export class AgentTeam {
     }
 
     return prompt;
+  }
+
+  /**
+   * 流式输出 + 智谱直连 + invoke 兜底 + 工具原始结果兜底
+   */
+  private async *streamWithFallback(
+    llmWithTools: BaseChatModel,
+    msgs: unknown[],
+    agentName: string,
+    toolResultTexts?: string[]
+  ): AsyncGenerator<string, string, unknown> {
+    let text = '';
+
+    if (isZhipuModel(this.modelId)) {
+      try {
+        for await (const t of streamZhipuChatCompletion(
+          this.modelId,
+          0.5,
+          msgs as import('@langchain/core/messages').BaseMessage[]
+        )) {
+          if (t) {
+            text += t;
+            yield t;
+          }
+        }
+      } catch (e) {
+        console.warn(`[${agentName}] 智谱直连流式失败:`, e);
+      }
+    }
+
+    if (!text.trim()) {
+      try {
+        const stream = await llmWithTools.stream(
+          msgs as import('@langchain/core/messages').BaseMessage[]
+        );
+        for await (const chunk of stream) {
+          const t = streamChunkToText(chunk);
+          if (t) {
+            text += t;
+            yield t;
+          }
+        }
+      } catch (e) {
+        console.warn(`[${agentName}] llmWithTools.stream 失败:`, e);
+      }
+    }
+
+    if (!text.trim()) {
+      try {
+        const resp = await this.llm.invoke(
+          msgs as import('@langchain/core/messages').BaseMessage[]
+        );
+        const t = messageContentToText(resp.content);
+        if (t.trim()) {
+          text += t;
+          yield t;
+        }
+      } catch (e) {
+        console.warn(`[${agentName}] llm.invoke 兜底失败:`, e);
+      }
+    }
+
+    if (!text.trim() && toolResultTexts?.length) {
+      const fallback =
+        `（${agentName} 模型未生成总结，以下为工具原始数据）\n\n` +
+        toolResultTexts.join('\n\n---\n\n');
+      yield fallback;
+      text += fallback;
+    }
+
+    if (!text.trim()) {
+      const notice = `（${agentName} 未输出内容，请尝试换用更大参数模型）\n`;
+      yield notice;
+      text += notice;
+    }
+
+    return text;
   }
 
   getContext(): TeamContext {

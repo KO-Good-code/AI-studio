@@ -2,49 +2,53 @@ import { HumanMessage, AIMessage, SystemMessage, ToolMessage } from '@langchain/
 import { allTools } from '@/lib/tools';
 import { createLLM, isZhipuModel, validateModel } from '@/lib/models/factory';
 import { streamZhipuChatCompletion } from '@/lib/models/zhipu-chat-stream';
-import { zodToJsonSchema } from 'zod-to-json-schema';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import { formatChatStreamError, mapLlmErrorToResponse } from '@/lib/api/llmErrors';
+import {
+  chatPostBodySchema,
+  normalizeClientMessageContent,
+} from '@/lib/chat/schemas';
+import { executeToolCall } from '@/lib/chat/executeToolCall';
+import { toolsToOpenAiFunctions } from '@/lib/chat/openaiToolDefs';
+import { messageContentToText, streamChunkToText } from '@/lib/langchain/messageText';
+import {
+  getLastUserQuery,
+  heuristicLimitListToolCall,
+} from '@/lib/chat/heuristicStockTools';
 import {
   connectMcpStdio,
   disconnectMcp,
-  findMcpBinding,
-  formatMcpToolResult,
   isMcpConfigured,
-  mcpRpcOptions,
   type McpConnected,
 } from '@/lib/mcp/session';
 
 export const runtime = 'nodejs';
 
-function messageContentToText(content: unknown): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c: any) => {
-        if (typeof c === 'string') return c;
-        if (c?.text != null) return String(c.text);
-        if (c?.type === 'text' && c?.text) return String(c.text);
-        return '';
-      })
-      .join('');
-  }
-  return String(content);
-}
-
-function streamChunkToText(chunk: unknown): string {
-  if (chunk == null) return '';
-  const c = chunk as Record<string, unknown>;
-  // ChatGenerationChunk / 部分 Runnable 可能带顶层 text
-  if (typeof c.text === 'string' && c.text) return c.text;
-  const msg = c.message as { content?: unknown } | undefined;
-  if (msg && msg.content != null) return messageContentToText(msg.content);
-  return messageContentToText(c.content);
-}
-
 export async function POST(req: Request) {
   try {
-    const { messages, model = 'llama3.2' } = await req.json();
+    let rawBody: unknown;
+    try {
+      rawBody = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: '无效的 JSON 请求体' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const parsed = chatPostBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return new Response(
+        JSON.stringify({
+          error: '请求参数无效',
+          issues: parsed.error.flatten(),
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { model, messages, temperature: bodyTemp } = parsed.data;
+    const temperature =
+      bodyTemp !== undefined ? bodyTemp : 0.7;
 
     console.log('📥 收到请求，使用模型:', model);
     console.log('📝 消息数量:', messages.length);
@@ -60,22 +64,12 @@ export async function POST(req: Request) {
       );
     }
 
-    const temperature = 0.7;
     const llm = createLLM(model, temperature);
 
-    const zhipuTools = allTools.map((tool) => ({
-      type: 'function' as const,
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: zodToJsonSchema(tool.schema, { target: 'openApi3' }),
-      },
-    }));
+    const zhipuTools = toolsToOpenAiFunctions(allTools);
 
-    const langchainMessages = messages.map((msg: any) => {
-      const content =
-        msg.content ||
-        (msg.parts ? msg.parts.map((p: any) => p.text).join('') : '');
+    const langchainMessages = messages.map((msg) => {
+      const content = normalizeClientMessageContent(msg);
       if (msg.role === 'user') return new HumanMessage(content);
       if (msg.role === 'assistant') return new AIMessage(content);
       if (msg.role === 'system') return new SystemMessage(content);
@@ -88,11 +82,12 @@ export async function POST(req: Request) {
       day: 'numeric',
       weekday: 'long',
     });
-    const hasSystemMsg = messages.some((msg: any) => msg.role === 'system');
+    const hasSystemMsg = messages.some((msg) => msg.role === 'system');
     const systemMsg = new SystemMessage(
       `当前日期: ${today}。如果用户提到"今天"、"最近"等时间词，请基于此日期理解。` +
+        ` A股工具：全市场涨停/跌停/炸板名单用 aShareLimitList；单只股票 OHLC 行情或K线用 aShareQuote；个股基本面/PE/PB/ROE/财报/股东/分红用 aShareStockInfo。` +
         (isMcpConfigured()
-          ? ' 带 mcp_ 前缀的工具来自 MCP 生态（如读文件、执行外部能力），按需调用。'
+          ? ' 带 mcp_ 前缀的工具来自 MCP 生态；其中 Yahoo/Finance 类多为单票、偏海外标的，一般不用于沪深全市场涨跌停榜单。'
           : '')
     );
     const allMessages = hasSystemMsg
@@ -115,12 +110,26 @@ export async function POST(req: Request) {
             mcp ? `(含 MCP ${mcp.bindings.length})` : ''
           );
 
-          const hasBindTools = typeof (llm as any).bindTools === 'function';
+          const hasBindTools = typeof (llm as { bindTools?: unknown }).bindTools === 'function';
           const llmWithTools = hasBindTools
             ? (llm as any).bindTools(mergedTools, { tool_choice: 'auto' })
             : llm;
 
           const response = await llmWithTools.invoke(allMessages);
+
+          const hiddenToolCalls = !response.tool_calls?.length
+            ? ((response as Record<string, unknown>).additional_kwargs as
+                | { tool_calls?: unknown[] }
+                | undefined
+              )?.tool_calls
+            : undefined;
+          if (hiddenToolCalls?.length) {
+            console.log(
+              '[chat] tool_calls 在 additional_kwargs 中，数量:',
+              hiddenToolCalls.length
+            );
+            response.tool_calls = hiddenToolCalls as typeof response.tool_calls;
+          }
 
           if (response.tool_calls && response.tool_calls.length > 0) {
             const aiMessageWithToolCalls = new AIMessage({
@@ -131,46 +140,15 @@ export async function POST(req: Request) {
             const toolMessages: ToolMessage[] = [];
 
             for (const toolCall of response.tool_calls) {
-              const binding = mcp
-                ? findMcpBinding(mcp.bindings, toolCall.name)
-                : undefined;
-              let resultString: string;
-
-              if (binding && mcp) {
-                try {
-                  const raw = await binding.client.callTool(
-                    {
-                      name: binding.mcpName,
-                      arguments: (toolCall.args || {}) as Record<
-                        string,
-                        unknown
-                      >,
-                    },
-                    CallToolResultSchema,
-                    mcpRpcOptions()
-                  );
-                  resultString = formatMcpToolResult(raw as any);
-                  console.log(`✅ MCP 工具 ${binding.mcpName} 执行成功`);
-                } catch (err: any) {
-                  resultString = `MCP 工具失败: ${err.message}`;
-                  console.error(`❌ MCP ${binding.mcpName}:`, err.message);
-                }
-              } else {
-                const tool = allTools.find((t) => t.name === toolCall.name);
-                if (!tool) {
-                  resultString = `未知工具: ${toolCall.name}`;
-                } else {
-                  try {
-                    const toolResult = await tool.func(toolCall.args);
-                    resultString =
-                      typeof toolResult === 'string'
-                        ? toolResult
-                        : JSON.stringify(toolResult);
-                  } catch (error: any) {
-                    resultString = `工具执行失败: ${error.message}`;
-                  }
-                }
-              }
+              const resultString = await executeToolCall(
+                {
+                  name: toolCall.name,
+                  id: toolCall.id,
+                  args: (toolCall.args ?? {}) as Record<string, unknown>,
+                },
+                mcp,
+                { label: 'chat' }
+              );
 
               toolMessages.push(
                 new ToolMessage({
@@ -183,7 +161,6 @@ export async function POST(req: Request) {
             const messagesWithTools = [...messagesWithAI, ...toolMessages];
             let streamed = '';
 
-            // 智谱：LangChain ChatOpenAI 的 completions 流会跳过非 string 的 delta.content，导致无正文
             if (isZhipuModel(model)) {
               try {
                 for await (const text of streamZhipuChatCompletion(
@@ -197,7 +174,10 @@ export async function POST(req: Request) {
                   }
                 }
               } catch (e) {
-                console.warn('[chat] 智谱直连流式失败，将尝试 LangChain stream / invoke:', e);
+                console.warn(
+                  '[chat] 智谱直连流式失败，将尝试 LangChain stream / invoke:',
+                  e
+                );
               }
             }
 
@@ -226,17 +206,120 @@ export async function POST(req: Request) {
                     `（模型未生成说明，以下为工具原始结果）\n\n${toolMessages.map((m) => m.content).join('\n\n---\n\n')}`
                   )
                 );
+              } else {
+                controller.enqueue(
+                  encoder.encode(
+                    '（工具已调度但无返回内容，请查看服务端日志或更换模型。）'
+                  )
+                );
               }
             }
           } else {
-            const text = messageContentToText(response.content);
-            if (text) controller.enqueue(encoder.encode(text));
+            console.log('[chat] 模型首轮无 tool_calls，尝试流式拿正文');
+            let streamedPlain = '';
+
+            if (isZhipuModel(model)) {
+              try {
+                for await (const text of streamZhipuChatCompletion(
+                  model,
+                  temperature,
+                  allMessages
+                )) {
+                  if (text) {
+                    streamedPlain += text;
+                    controller.enqueue(encoder.encode(text));
+                  }
+                }
+              } catch (e) {
+                console.warn('[chat] 无工具路径 智谱直连流式失败:', e);
+              }
+            }
+
+            if (!streamedPlain.trim()) {
+              try {
+                const noToolStream = await llm.stream(allMessages);
+                for await (const chunk of noToolStream) {
+                  const text = streamChunkToText(chunk);
+                  if (text) {
+                    streamedPlain += text;
+                    controller.enqueue(encoder.encode(text));
+                  }
+                }
+              } catch (e) {
+                console.warn('[chat] 无工具路径 llm.stream 失败:', e);
+              }
+            }
+
+            if (!streamedPlain.trim()) {
+              console.warn(
+                '[chat] 无工具路径 stream 均无正文，尝试 llm.invoke（无工具绑定）'
+              );
+              try {
+                const finalMsg = await llm.invoke(allMessages);
+                const fb = messageContentToText(finalMsg.content);
+                if (fb.trim()) {
+                  controller.enqueue(encoder.encode(fb));
+                  streamedPlain = fb;
+                }
+              } catch (e) {
+                console.warn('[chat] 无工具路径 llm.invoke 兜底失败:', e);
+              }
+            }
+
+            if (!streamedPlain.trim()) {
+              const q = getLastUserQuery(messages);
+              const hint = heuristicLimitListToolCall(q);
+              if (hint) {
+                console.log(
+                  `[chat] 模型无输出，启发式代调工具 ${hint.name}`,
+                  hint.args
+                );
+                try {
+                  const toolOut = await executeToolCall(
+                    hint,
+                    mcp,
+                    { label: 'chat-heuristic' }
+                  );
+                  controller.enqueue(
+                    encoder.encode(
+                      `（模型未触发工具调用，已根据问题自动执行 ${hint.name}）\n\n${toolOut}`
+                    )
+                  );
+                } catch (e) {
+                  console.error('[chat] 启发式工具调用失败:', e);
+                  controller.enqueue(
+                    encoder.encode(
+                      `（启发式工具调用失败：${e instanceof Error ? e.message : String(e)}）`
+                    )
+                  );
+                }
+              } else {
+                controller.enqueue(
+                  encoder.encode(
+                    [
+                      '（模型未输出任何文字。常见原因：）',
+                      '1）工具数量过多（当前 ' +
+                        mergedTools.length +
+                        '）可能干扰模型，可在 mcp.config.json 中关掉不需要的 MCP 服务；',
+                      '2）智谱 flash 模型 + LangChain 工具绑定偶发空回复，可换 glm-4.7 或更大参数模型；',
+                      '3）请查看终端日志。',
+                    ].join('\n')
+                  )
+                );
+              }
+            }
           }
 
           controller.close();
         } catch (error) {
           console.error('❌ 流式响应错误:', error);
-          controller.error(error);
+          try {
+            const text = formatChatStreamError(error);
+            controller.enqueue(encoder.encode(text));
+            controller.close();
+          } catch {
+            controller.error(error);
+          }
         } finally {
           await disconnectMcp(mcp);
         }
@@ -249,28 +332,16 @@ export async function POST(req: Request) {
         'Transfer-Encoding': 'chunked',
       },
     });
-  } catch (error: any) {
-    console.error('>>> API Error:', error.message);
-
-    let errorMessage = error.message;
-    let suggestion = '请检查服务配置';
-
-    if (error.message.includes('ECONNREFUSED')) {
-      errorMessage = '无法连接到 Ollama 服务';
-      suggestion = '请运行: ollama serve';
-    } else if (
-      error.message.includes('model') ||
-      error.message.includes('not found')
-    ) {
-      errorMessage = '模型未找到';
-      suggestion = '请运行: ollama pull llama3.2 或 ollama pull qwen2.5:7b';
-    }
+  } catch (error: unknown) {
+    console.error('>>> API Error:', error);
+    const { error: errorMessage, suggestion, details } =
+      mapLlmErrorToResponse(error);
 
     return new Response(
       JSON.stringify({
         error: errorMessage,
         suggestion,
-        details: error.message,
+        details,
       }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
