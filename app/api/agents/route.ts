@@ -1,4 +1,4 @@
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getAllAgents, getBuiltInAgents, isBuiltInAgent } from '@/lib/agents/manager';
 import { loadCustomAgents, upsertAgent, deleteAgent } from '@/lib/agents/storage';
 import { AgentConfig } from '@/lib/agents/types';
@@ -32,8 +32,17 @@ export async function GET() {
  * POST /api/agents - 创建或更新 Agent
  */
 export async function POST(req: NextRequest) {
+  let body: unknown;
   try {
-    const body = await req.json();
+    body = await req.json();
+  } catch {
+    return NextResponse.json(
+      { success: false, error: '无效的 JSON 请求体' },
+      { status: 400 }
+    );
+  }
+
+  try {
     const { id, agent } = body as { id: string; agent: AgentConfig };
 
     if (!id || !agent) {

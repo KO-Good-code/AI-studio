@@ -41,3 +41,6 @@ next-env.d.ts
 
 # MCP 配置（常含 Token，勿提交）
 mcp.config.json
+
+# 会话数据（本地生成，勿提交）
+/data/

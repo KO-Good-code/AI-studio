@@ -14,6 +14,7 @@ import {
   disconnectMcp,
   type McpConnected,
 } from '@/lib/mcp/session';
+import { getMemoryPrompt } from '@/lib/storage/memories';
 
 /** 调度结果：谁上场、是否链式传递本轮发言 */
 interface TeamRoutePlan {
@@ -165,12 +166,22 @@ export class AgentTeam {
 
     yield `📋 **关键词初筛候选**: ${candidateIds.length} 人\n\n`;
 
-    const plan = await this.runTeamRouter(
-      candidateIds,
-      allAgentsMap,
-      currentQuestion,
-      conversationHistory
-    );
+    let plan: TeamRoutePlan;
+    if (candidateIds.length === 1) {
+      plan = {
+        agentIds: candidateIds,
+        chainPriorOutputs: false,
+        reason: '仅一位候选成员，直接执行（跳过调度）',
+      };
+      yield `⚡ **单 Agent 模式，跳过调度**\n\n`;
+    } else {
+      plan = await this.runTeamRouter(
+        candidateIds,
+        allAgentsMap,
+        currentQuestion,
+        conversationHistory
+      );
+    }
 
     const agents = plan.agentIds
       .map((id) => allAgentsMap[id])
@@ -183,7 +194,9 @@ export class AgentTeam {
     }
 
     yield `🧭 **调度**: ${plan.reason || '已根据问题选择参与成员'}\n\n`;
-    yield `🔗 **本轮链式传递前序发言**: ${plan.chainPriorOutputs ? '是（后一位可读前一位本轮输出）' : '否（后一位仅看用户与历史对话）'}\n\n`;
+    if (agents.length > 1) {
+      yield `🔗 **本轮链式传递前序发言**: ${plan.chainPriorOutputs ? '是（后一位可读前一位本轮输出）' : '否（后一位仅看用户与历史对话）'}\n\n`;
+    }
     yield `✅ **本轮实际参与** (${agents.length} 人): ${agents.map((a) => `${a.emoji} ${a.name}`).join(' → ')}\n\n`;
 
     const baseOpenAiTools = toolsToOpenAiFunctions(allTools);
@@ -243,13 +256,15 @@ export class AgentTeam {
         independentThisRound
       );
 
+      const memoryPrompt = await getMemoryPrompt();
       const systemPrompt =
         `当前日期: ${today}\n\n${agent.systemPrompt}\n\n你可以使用工具来获取实时信息。` +
         `A股工具：涨跌停/炸板名单用 aShareLimitList；OHLC行情/K线用 aShareQuote；个股基本面/PE/ROE/财报/股东/分红用 aShareStockInfo；新闻与泛搜索用 webSearch。` +
         (mcp
           ? `\n\n带 \`mcp_\` 前缀的工具来自 MCP 生态；Yahoo/Finance 类多为单票、偏海外数据源，一般不用于沪深全市场涨跌停榜单。`
           : '') +
-        `\n\n若用户用「它」「这只」「上面」「刚才」「对应」等指代，请结合【此前对话记录】推断具体指什么（如股票代码、产品名），不要无故要求用户重复已说过的信息。`;
+        `\n\n若用户用「它」「这只」「上面」「刚才」「对应」等指代，请结合【此前对话记录】推断具体指什么（如股票代码、产品名），不要无故要求用户重复已说过的信息。` +
+        (memoryPrompt ? `\n\n${memoryPrompt}` : '');
 
       let agentResponse = '';
       try {
@@ -265,11 +280,14 @@ export class AgentTeam {
             yield `\n🔧 *正在调用工具: ${tc.name}...*\n\n`;
           }
 
+          const cleanedContent = typeof response.content === 'string'
+            ? AgentTeam.cleanToolCallTags(response.content)
+            : response.content;
           const msgs: any[] = [
             new SystemMessage(systemPrompt),
             new HumanMessage(fullPrompt),
             new AIMessage({
-              content: response.content,
+              content: cleanedContent,
               tool_calls: response.tool_calls,
             }),
           ];
@@ -300,15 +318,25 @@ export class AgentTeam {
             toolMsgContents
           );
         } else {
-          const plainMsgs = [
-            new SystemMessage(systemPrompt),
-            new HumanMessage(fullPrompt),
-          ];
-          agentResponse += yield* this.streamWithFallback(
-            llmWithTools,
-            plainMsgs,
-            agent.name
-          );
+          const directContent = typeof response.content === 'string'
+            ? AgentTeam.cleanToolCallTags(response.content).trim()
+            : messageContentToText(response.content).trim();
+
+          if (directContent) {
+            yield directContent;
+            agentResponse += directContent;
+          } else {
+            console.warn(`[${agent.name}] invoke 无内容，走 streamWithFallback`);
+            const plainMsgs = [
+              new SystemMessage(systemPrompt),
+              new HumanMessage(fullPrompt),
+            ];
+            agentResponse += yield* this.streamWithFallback(
+              llmWithTools,
+              plainMsgs,
+              agent.name
+            );
+          }
         }
 
         this.context.agentResponses.push({
@@ -386,6 +414,10 @@ export class AgentTeam {
   /**
    * 流式输出 + 智谱直连 + invoke 兜底 + 工具原始结果兜底
    */
+  private static cleanToolCallTags(s: string): string {
+    return s.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '');
+  }
+
   private async *streamWithFallback(
     llmWithTools: BaseChatModel,
     msgs: unknown[],
@@ -393,6 +425,15 @@ export class AgentTeam {
     toolResultTexts?: string[]
   ): AsyncGenerator<string, string, unknown> {
     let text = '';
+
+    let buf = '';
+    const flushClean = function* (this: void, raw: string): Generator<string> {
+      buf += raw;
+      const cleaned = AgentTeam.cleanToolCallTags(buf);
+      if (/<tool_call/i.test(buf) && !/<\/tool_call>/i.test(buf)) return;
+      if (cleaned.trim()) yield cleaned;
+      buf = '';
+    };
 
     if (isZhipuModel(this.modelId)) {
       try {
@@ -402,14 +443,14 @@ export class AgentTeam {
           msgs as import('@langchain/core/messages').BaseMessage[]
         )) {
           if (t) {
-            text += t;
-            yield t;
+            for (const c of flushClean(t)) { text += c; yield c; }
           }
         }
       } catch (e) {
         console.warn(`[${agentName}] 智谱直连流式失败:`, e);
       }
     }
+    if (buf) { const c = AgentTeam.cleanToolCallTags(buf); if (c.trim()) { text += c; yield c; } buf = ''; }
 
     if (!text.trim()) {
       try {
@@ -419,21 +460,21 @@ export class AgentTeam {
         for await (const chunk of stream) {
           const t = streamChunkToText(chunk);
           if (t) {
-            text += t;
-            yield t;
+            for (const c of flushClean(t)) { text += c; yield c; }
           }
         }
       } catch (e) {
         console.warn(`[${agentName}] llmWithTools.stream 失败:`, e);
       }
     }
+    if (buf) { const c = AgentTeam.cleanToolCallTags(buf); if (c.trim()) { text += c; yield c; } buf = ''; }
 
     if (!text.trim()) {
       try {
         const resp = await this.llm.invoke(
           msgs as import('@langchain/core/messages').BaseMessage[]
         );
-        const t = messageContentToText(resp.content);
+        const t = AgentTeam.cleanToolCallTags(messageContentToText(resp.content));
         if (t.trim()) {
           text += t;
           yield t;

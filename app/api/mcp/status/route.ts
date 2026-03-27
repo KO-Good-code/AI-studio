@@ -12,12 +12,15 @@ export const runtime = 'nodejs';
  */
 export async function GET() {
   if (!isMcpConfigured()) {
-    return Response.json({
-      ok: false,
-      configured: false,
-      message:
-        '未检测到 MCP 配置。请添加 mcp.config.json 或环境变量 MCP_SERVER / MCP_SERVERS / MCP_HTTP_URL',
-    });
+    return Response.json(
+      {
+        ok: false,
+        configured: false,
+        message:
+          '未检测到 MCP 配置。请添加 mcp.config.json 或环境变量 MCP_SERVER / MCP_SERVERS / MCP_HTTP_URL',
+      },
+      { status: 503 }
+    );
   }
 
   let conn: Awaited<ReturnType<typeof connectMcpStdio>> = null;
@@ -43,13 +46,16 @@ export async function GET() {
       })),
       hint: '单聊里可让模型调用上述 exposedName（如：请用 mcp_xxx 列出当前目录）',
     });
-  } catch (e: any) {
-    return Response.json({
-      ok: false,
-      configured: true,
-      message: e?.message || String(e),
-      tools: [],
-    });
+  } catch (e: unknown) {
+    return Response.json(
+      {
+        ok: false,
+        configured: true,
+        message: e instanceof Error ? e.message : String(e),
+        tools: [],
+      },
+      { status: 502 }
+    );
   } finally {
     await disconnectMcp(conn);
   }

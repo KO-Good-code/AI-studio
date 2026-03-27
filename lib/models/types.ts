@@ -102,14 +102,6 @@ const ZHIPU_TEXT_MODELS: ModelConfig[] = [
     maxTokens: 16_384,
   },
   {
-    id: 'glm-4.7-flash',
-    name: 'glm-4.7-flash',
-    provider: 'zhipu',
-    displayName: '🆓 GLM-4.7-Flash',
-    description: '免费档，普惠高速',
-    maxTokens: 131_072,
-  },
-  {
     id: 'glm-4.5-flash',
     name: 'glm-4.5-flash',
     provider: 'zhipu',

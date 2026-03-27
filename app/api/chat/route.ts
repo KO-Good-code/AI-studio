@@ -20,6 +20,8 @@ import {
   isMcpConfigured,
   type McpConnected,
 } from '@/lib/mcp/session';
+import { getMemoryPrompt } from '@/lib/storage/memories';
+import { extractAll } from '@/lib/memory/combined-extractor';
 
 export const runtime = 'nodejs';
 
@@ -82,13 +84,17 @@ export async function POST(req: Request) {
       day: 'numeric',
       weekday: 'long',
     });
+
+    const memoryPrompt = await getMemoryPrompt();
+
     const hasSystemMsg = messages.some((msg) => msg.role === 'system');
     const systemMsg = new SystemMessage(
       `当前日期: ${today}。如果用户提到"今天"、"最近"等时间词，请基于此日期理解。` +
         ` A股工具：全市场涨停/跌停/炸板名单用 aShareLimitList；单只股票 OHLC 行情或K线用 aShareQuote；个股基本面/PE/PB/ROE/财报/股东/分红用 aShareStockInfo。` +
         (isMcpConfigured()
           ? ' 带 mcp_ 前缀的工具来自 MCP 生态；其中 Yahoo/Finance 类多为单票、偏海外标的，一般不用于沪深全市场涨跌停榜单。'
-          : '')
+          : '') +
+        (memoryPrompt ? `\n\n${memoryPrompt}` : '')
     );
     const allMessages = hasSystemMsg
       ? langchainMessages
@@ -98,6 +104,7 @@ export async function POST(req: Request) {
     const readableStream = new ReadableStream({
       async start(controller) {
         let mcp: McpConnected | null = null;
+        let collectedReply = '';
         try {
           mcp = await connectMcpStdio();
           const mergedTools = mcp
@@ -132,8 +139,11 @@ export async function POST(req: Request) {
           }
 
           if (response.tool_calls && response.tool_calls.length > 0) {
+            const cleanContent = typeof response.content === 'string'
+              ? response.content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '')
+              : response.content;
             const aiMessageWithToolCalls = new AIMessage({
-              content: response.content,
+              content: cleanContent,
               tool_calls: response.tool_calls,
             });
             const messagesWithAI = [...allMessages, aiMessageWithToolCalls];
@@ -214,6 +224,7 @@ export async function POST(req: Request) {
                 );
               }
             }
+            collectedReply = streamed;
           } else {
             console.log('[chat] 模型首轮无 tool_calls，尝试流式拿正文');
             let streamedPlain = '';
@@ -308,9 +319,21 @@ export async function POST(req: Request) {
                 );
               }
             }
+            collectedReply = streamedPlain;
           }
 
           controller.close();
+
+          const normalizedMsgs = messages.map((m) => ({ role: m.role, content: m.content ?? '' }));
+          if (collectedReply.trim()) {
+            normalizedMsgs.push({ role: 'assistant', content: collectedReply });
+          }
+          (async () => {
+            try {
+              await new Promise((r) => setTimeout(r, 30000));
+              await extractAll(model, normalizedMsgs);
+            } catch (err) { console.error('[chat] 后台合并提取失败:', err); }
+          })();
         } catch (error) {
           console.error('❌ 流式响应错误:', error);
           try {

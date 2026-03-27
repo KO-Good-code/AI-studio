@@ -1,4 +1,4 @@
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { loadCustomTeams, upsertTeam, deleteTeam, getTeamById } from '@/lib/agents/storage';
 import { Team } from '@/lib/agents/storage';
 
@@ -27,8 +27,17 @@ export async function GET() {
  * POST /api/teams - 创建或更新 Team
  */
 export async function POST(req: NextRequest) {
+  let body: unknown;
   try {
-    const body = await req.json();
+    body = await req.json();
+  } catch {
+    return NextResponse.json(
+      { success: false, error: '无效的 JSON 请求体' },
+      { status: 400 }
+    );
+  }
+
+  try {
     const { id, name, description, agentIds } = body as Partial<Team>;
 
     if (!id || !name || !agentIds || agentIds.length === 0) {

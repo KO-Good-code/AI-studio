@@ -16,6 +16,7 @@ const limitListOkCache = new Map<
   { expiresAt: number; body: string }
 >();
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CACHE_MAX_ENTRIES = 100;
 
 function cacheKey(
   date: string,
@@ -24,6 +25,16 @@ function cacheKey(
   max_rows: number
 ): string {
   return `${date}|${limit_type}|${exchange ?? ''}|${max_rows}`;
+}
+
+function evictCacheIfNeeded() {
+  if (limitListOkCache.size <= CACHE_MAX_ENTRIES) return;
+  const now = Date.now();
+  for (const [k, v] of limitListOkCache) {
+    if (v.expiresAt < now || limitListOkCache.size > CACHE_MAX_ENTRIES) {
+      limitListOkCache.delete(k);
+    }
+  }
 }
 
 function tushareLimitListHint(code: number, msg: string): string {
@@ -121,6 +132,7 @@ export const aShareLimitListTool = new DynamicStructuredTool({
               '不含 ST 等口径以 Tushare 为准；不构成投资建议。若条数为 0 可能是非交易日或当日无涨跌停记录。',
           };
           const body = JSON.stringify(out, null, 2);
+          evictCacheIfNeeded();
           limitListOkCache.set(ck, {
             expiresAt: Date.now() + CACHE_TTL_MS,
             body,
@@ -139,6 +151,7 @@ export const aShareLimitListTool = new DynamicStructuredTool({
               '当日无炸板记录或非交易日；不构成投资建议。',
           };
           const body = JSON.stringify(out, null, 2);
+          evictCacheIfNeeded();
           limitListOkCache.set(ck, {
             expiresAt: Date.now() + CACHE_TTL_MS,
             body,
@@ -228,6 +241,7 @@ export const aShareLimitListTool = new DynamicStructuredTool({
     }
 
     const body = JSON.stringify(finalObj, null, 2);
+    evictCacheIfNeeded();
     limitListOkCache.set(ck, { expiresAt: Date.now() + CACHE_TTL_MS, body });
     return body;
   },

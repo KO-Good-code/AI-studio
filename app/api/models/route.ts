@@ -8,15 +8,18 @@ export async function GET() {
     const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
     
     // 获取 Ollama 本地模型列表
-    let ollamaModels: any[] = [];
+    let ollamaModels: Array<{ name: string; size: number; [k: string]: unknown }> = [];
     try {
-      const response = await fetch(`${ollamaBaseUrl}/api/tags`);
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 5000);
+      const response = await fetch(`${ollamaBaseUrl}/api/tags`, { signal: ac.signal });
+      clearTimeout(timer);
       if (response.ok) {
         const data = await response.json();
         ollamaModels = data.models || [];
       }
-    } catch (error) {
-      console.warn('无法连接到 Ollama 服务');
+    } catch {
+      console.warn('无法连接到 Ollama 服务（超时或不可达）');
     }
 
     // 1. 处理预定义的模型（包括 Ollama 和云端模型）

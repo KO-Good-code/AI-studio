@@ -3,6 +3,7 @@ import { getTeamById } from '@/lib/agents/storage';
 import { validateModel } from '@/lib/models/factory';
 import { mapLlmErrorToResponse } from '@/lib/api/llmErrors';
 import { teamPostBodySchema } from '@/lib/chat/schemas';
+import { extractAll } from '@/lib/memory/combined-extractor';
 
 export const runtime = 'nodejs';
 
@@ -84,15 +85,28 @@ export async function POST(req: Request) {
     const readableStream = new ReadableStream({
       async start(controller) {
         try {
+          let assistantReply = '';
           for await (const chunk of team.processWithTeam(
             chatMessages,
             customAgentIds
           )) {
+            assistantReply += chunk;
             controller.enqueue(encoder.encode(chunk));
           }
 
           controller.close();
           console.log('✅ Team 协作完成');
+
+          const fullMessages = [
+            ...chatMessages,
+            { role: 'assistant', content: assistantReply },
+          ];
+          (async () => {
+            try {
+              await new Promise((r) => setTimeout(r, 30000));
+              await extractAll(model, fullMessages);
+            } catch (err) { console.error('[team] 后台合并提取失败:', err); }
+          })();
         } catch (error: unknown) {
           console.error('❌ Team 协作错误:', error);
           const msg = error instanceof Error ? error.message : String(error);
