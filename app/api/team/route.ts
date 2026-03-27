@@ -103,7 +103,7 @@ export async function POST(req: Request) {
           ];
           (async () => {
             try {
-              await new Promise((r) => setTimeout(r, 30000));
+              await new Promise((r) => setTimeout(r, 15000));
               await extractAll(model, fullMessages);
             } catch (err) { console.error('[team] 后台合并提取失败:', err); }
           })();

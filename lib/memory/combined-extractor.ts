@@ -28,12 +28,19 @@ const COMBINED_PROMPT = `你是一个信息提取助手，需要同时完成两�
 规则：
 - 只提取有明确股票名称+代码、且涉及具体买入/打板操作的记录
 - 不提取纯行情分析或泛泛讨论
+- **必须准确标注以下关键字段**：
+  · isDragon: 是否龙一/龙头？根据对话中"龙头""总龙""龙一""板块龙头"等描述判断，是=true，否/不确定=false
+  · boardInfo: 最新几连板？如"首板""2连板""3连板""4连板""断板反包"。根据对话中实际连板数据填写，不要猜测
+  · position: 推荐仓位？如"必须满仓""1/2仓""1/3仓""1w""轻仓"。根据对话中的仓位建议填写；若对话明确说"龙头必须满仓"则填"必须满仓"；若无仓位建议则留空
+  · concept: 主线概念，如"电力+氢能""算力租赁""固态电池"
+  · strategy: 打板策略，如"涨停,不能直接排板,只打回封""竞价高开3%以上排板"
+  · notes: 额外补充，如"大妖股,必须满仓梭哈,能吃3个板""有低价尽量买低价,次日有涨停的溢价"
 今天日期：{today}
 
 ## 输出格式（必须是合法 JSON）
 {
   "memories": [{"content": "...", "category": "preference|fact|habit|instruction|other"}],
-  "tradeRecords": [{"stockName":"华电能源","stockCode":"600726","concept":"电力","isDragon":true,"position":"满仓","tradeDate":"20260327","marketCap":"319","price":"4.27","changePercent":"8.24%","boardInfo":"3连板","strategy":"涨停,不能直接排板,只打回封","notes":""}]
+  "tradeRecords": [{"stockName":"融捷股份","stockCode":"002192","concept":"固态电池","isDragon":true,"position":"必须满仓","tradeDate":"20260327","marketCap":"110","price":"78","changePercent":"9.99%","boardInfo":"2连板","strategy":"竞价高开3%-5%,低开放弃,快速拉升封板","notes":"锂电板块总龙头,成交额31亿,资金共识最强"}]
 }
 
 如果某个数组没有可提取的内容，返回空数组。`;
@@ -55,10 +62,16 @@ export async function extractAll(
       .replace('{existing_memories}', existingStr)
       .replace('{today}', today);
 
-    const conversationStr = messages
+    const filtered = messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .slice(-10)
-      .map((m) => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content.slice(0, 800)}`)
+      .slice(-10);
+
+    const conversationStr = filtered
+      .map((m, idx) => {
+        const isLast = idx === filtered.length - 1;
+        const limit = isLast ? 4000 : 1200;
+        return `${m.role === 'user' ? '用户' : 'AI'}: ${m.content.slice(0, limit)}`;
+      })
       .join('\n\n');
 
     const llm = createLLM(model, 0.1);
@@ -83,7 +96,10 @@ export async function extractAll(
         throw retryErr;
       }
     }
-    if (!response) return { memories: [], records: [] };
+    if (!response) {
+      console.warn('[extractor] LLM 未返回响应');
+      return { memories: [], records: [] };
+    }
 
     const text = typeof response.content === 'string'
       ? response.content
@@ -91,16 +107,24 @@ export async function extractAll(
         ? response.content.map((c) => (typeof c === 'string' ? c : ((c as Record<string, unknown>).text as string) ?? '')).join('')
         : '';
 
+    console.log('[extractor] LLM 原始输出长度:', text.length, '前200字:', text.slice(0, 200));
+
     const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
     const match = cleaned.match(/\{[\s\S]*\}/);
-    if (!match) return { memories: [], records: [] };
+    if (!match) {
+      console.warn('[extractor] 未匹配到 JSON 对象，cleaned 前300字:', cleaned.slice(0, 300));
+      return { memories: [], records: [] };
+    }
 
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(match[0]);
-    } catch {
+    } catch (e) {
+      console.warn('[extractor] JSON 解析失败:', e, '原始片段:', match[0].slice(0, 300));
       return { memories: [], records: [] };
     }
+    console.log('[extractor] 解析成功 memories:', Array.isArray(parsed.memories) ? parsed.memories.length : 0,
+      'tradeRecords:', Array.isArray(parsed.tradeRecords) ? parsed.tradeRecords.length : 0);
 
     // Process memories
     let savedMemories: MemoryItem[] = [];

@@ -212,11 +212,6 @@ export class AgentTeam {
         yield `🔌 **MCP 已连接**（${mcp.bindings.length} 个外部工具，名称以 \`mcp_\` 开头）\n\n`;
       }
 
-      const hasBindTools = typeof (this.llm as any).bindTools === 'function';
-      const llmWithTools = hasBindTools
-        ? (this.llm as any).bindTools(mergedTools, { tool_choice: 'auto' })
-        : this.llm;
-
       yield `---\n\n`;
 
     this.context.status = 'executing';
@@ -256,13 +251,19 @@ export class AgentTeam {
         independentThisRound
       );
 
+      const agentTools = AgentTeam.filterToolsForAgent(agent, mergedTools);
+      const hasBindTools = typeof (this.llm as any).bindTools === 'function';
+      const llmWithTools = hasBindTools
+        ? (this.llm as any).bindTools(agentTools, { tool_choice: 'auto' })
+        : this.llm;
+
+      console.log(`[${agent.name}] 绑定 ${agentTools.length}/${mergedTools.length} 个工具`);
+
       const memoryPrompt = await getMemoryPrompt();
       const systemPrompt =
         `当前日期: ${today}\n\n${agent.systemPrompt}\n\n你可以使用工具来获取实时信息。` +
         `A股工具：涨跌停/炸板名单用 aShareLimitList；OHLC行情/K线用 aShareQuote；个股基本面/PE/ROE/财报/股东/分红用 aShareStockInfo；新闻与泛搜索用 webSearch。` +
-        (mcp
-          ? `\n\n带 \`mcp_\` 前缀的工具来自 MCP 生态；Yahoo/Finance 类多为单票、偏海外数据源，一般不用于沪深全市场涨跌停榜单。`
-          : '') +
+        `\n\n⚠️ 重要：当用户要求"获取最新信息"或"重新分析"时，你**必须**先调用工具获取实时数据，然后再给出分析。不要依赖历史对话中的旧数据。` +
         `\n\n若用户用「它」「这只」「上面」「刚才」「对应」等指代，请结合【此前对话记录】推断具体指什么（如股票代码、产品名），不要无故要求用户重复已说过的信息。` +
         (memoryPrompt ? `\n\n${memoryPrompt}` : '');
 
@@ -272,6 +273,17 @@ export class AgentTeam {
           new SystemMessage(systemPrompt),
           new HumanMessage(fullPrompt),
         ]);
+
+        const hiddenToolCalls = !response.tool_calls?.length
+          ? ((response as Record<string, unknown>).additional_kwargs as
+              | { tool_calls?: unknown[] }
+              | undefined
+            )?.tool_calls
+          : undefined;
+        if (hiddenToolCalls?.length) {
+          console.log(`[${agent.name}] tool_calls 在 additional_kwargs 中，数量:`, hiddenToolCalls.length);
+          response.tool_calls = hiddenToolCalls as typeof response.tool_calls;
+        }
 
         if (response.tool_calls && response.tool_calls.length > 0) {
           console.log(`🔧 [${agent.name}] 触发 ${response.tool_calls.length} 个工具调用`);
@@ -411,9 +423,31 @@ export class AgentTeam {
     return prompt;
   }
 
-  /**
-   * 流式输出 + 智谱直连 + invoke 兜底 + 工具原始结果兜底
-   */
+  private static readonly STOCK_TOOL_NAMES = new Set([
+    'aShareLimitList',
+    'aShareQuote',
+    'aShareStockInfo',
+    'webSearch',
+  ]);
+
+  private static isStockAgent(agent: AgentConfig): boolean {
+    const text = `${agent.systemPrompt} ${agent.description} ${agent.specialties.join(' ')}`;
+    return /A股|打板|龙头|涨停|股票|短线|连板/.test(text);
+  }
+
+  private static filterToolsForAgent(
+    agent: AgentConfig,
+    allTools: Record<string, unknown>[]
+  ): Record<string, unknown>[] {
+    if (!AgentTeam.isStockAgent(agent)) return allTools;
+
+    return allTools.filter((tool) => {
+      const fn = (tool as { function?: { name?: string } }).function;
+      const name = fn?.name ?? '';
+      return AgentTeam.STOCK_TOOL_NAMES.has(name);
+    });
+  }
+
   private static cleanToolCallTags(s: string): string {
     return s.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '');
   }
