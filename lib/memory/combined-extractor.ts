@@ -2,7 +2,7 @@
  * 合并提取器 — 一次 LLM 调用同时提取用户记忆 + 操作记录
  * 解决智谱 API 速率限制问题（从 2 次后台调用减到 1 次）
  */
-import { createLLM } from '@/lib/models/factory';
+import { createLLMAsync } from '@/lib/models/factory';
 import { addMemories, listMemories, type MemoryItem } from '@/lib/storage/memories';
 import { addTradeRecords, type TradeRecord } from '@/lib/storage/trade-records';
 
@@ -74,7 +74,7 @@ export async function extractAll(
       })
       .join('\n\n');
 
-    const llm = createLLM(model, 0.1);
+    const llm = await createLLMAsync(model, 0.1);
     const { HumanMessage, SystemMessage } = await import('@langchain/core/messages');
 
     let response;
@@ -101,13 +101,20 @@ export async function extractAll(
       return { memories: [], records: [] };
     }
 
-    const text = typeof response.content === 'string'
+    const rawText = typeof response.content === 'string'
       ? response.content
       : Array.isArray(response.content)
         ? response.content.map((c) => (typeof c === 'string' ? c : ((c as Record<string, unknown>).text as string) ?? '')).join('')
         : '';
 
-    console.log('[extractor] LLM 原始输出长度:', text.length, '前200字:', text.slice(0, 200));
+    const text = rawText
+      .replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<\/?think>/g, '')
+      .replace(/<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/g, '').replace(/<\/?minimax:[^>]*>/g, '')
+      .replace(/<invoke[\s\S]*?<\/invoke>/g, '').replace(/<\/?invoke[^>]*>/g, '')
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '')
+      .trim();
+
+    console.log('[extractor] LLM 原始输出长度:', rawText.length, '清理后:', text.length, '前200字:', text.slice(0, 200));
 
     const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
     const match = cleaned.match(/\{[\s\S]*\}/);

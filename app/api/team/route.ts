@@ -70,7 +70,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const team = new AgentTeam(model);
+    const team = await AgentTeam.create(model);
 
     let customAgentIds: string[] | null = null;
     if (teamId) {

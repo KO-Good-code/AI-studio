@@ -2,7 +2,7 @@ import { HumanMessage, SystemMessage, AIMessage, ToolMessage } from '@langchain/
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { selectAgentsForTask } from './configs';
 import { AgentConfig, TeamContext } from './types';
-import { createLLM, isZhipuModel } from '@/lib/models/factory';
+import { createLLM, createLLMAsync, isZhipuModel } from '@/lib/models/factory';
 import { streamZhipuChatCompletion } from '@/lib/models/zhipu-chat-stream';
 import { messageContentToText } from '@/lib/langchain/messageText';
 import { allTools } from '@/lib/tools';
@@ -32,16 +32,20 @@ export class AgentTeam {
 
   private modelId: string;
 
-  constructor(model: string) {
+  private constructor(model: string, llm: BaseChatModel) {
     this.modelId = model;
-    this.llm = createLLM(model, 0.5);
-
+    this.llm = llm;
     this.context = {
       originalQuestion: '',
       currentAgent: '',
       agentResponses: [],
       status: 'planning',
     };
+  }
+
+  static async create(model: string): Promise<AgentTeam> {
+    const llm = await createLLMAsync(model, 0.5);
+    return new AgentTeam(model, llm);
   }
 
   /**
@@ -264,6 +268,7 @@ export class AgentTeam {
         `当前日期: ${today}\n\n${agent.systemPrompt}\n\n你可以使用工具来获取实时信息。` +
         `A股工具：涨跌停/炸板名单用 aShareLimitList；OHLC行情/K线用 aShareQuote；个股基本面/PE/ROE/财报/股东/分红用 aShareStockInfo；新闻与泛搜索用 webSearch。` +
         `\n\n⚠️ 重要：当用户要求"获取最新信息"或"重新分析"时，你**必须**先调用工具获取实时数据，然后再给出分析。不要依赖历史对话中的旧数据。` +
+        `\n\n🚫 禁止在回复文本中写 XML 格式的工具调用（如 <tool_call>、<invoke>、<minimax:tool_call> 等）。你只能通过系统提供的 function calling 机制调用工具。如果工具已返回数据，请直接基于数据进行分析总结，不要尝试调用更多工具。` +
         `\n\n若用户用「它」「这只」「上面」「刚才」「对应」等指代，请结合【此前对话记录】推断具体指什么（如股票代码、产品名），不要无故要求用户重复已说过的信息。` +
         (memoryPrompt ? `\n\n${memoryPrompt}` : '');
 
@@ -323,8 +328,15 @@ export class AgentTeam {
             .filter((m: unknown) => m instanceof ToolMessage)
             .map((m: ToolMessage) => String(m.content));
 
+          msgs.push(
+            new HumanMessage(
+              '请直接基于以上工具返回的数据，给出完整、详细的分析总结。' +
+              '不要尝试调用更多工具，不要输出任何 XML 标签。'
+            )
+          );
+
           agentResponse += yield* this.streamWithFallback(
-            llmWithTools,
+            this.llm,
             msgs,
             agent.name,
             toolMsgContents
@@ -428,6 +440,15 @@ export class AgentTeam {
     'aShareQuote',
     'aShareStockInfo',
     'webSearch',
+    'mcp_web_search',
+    'mcp_get_stock_info',
+    'mcp_get_historical_stock_prices',
+    'mcp_get_stock_actions',
+    'mcp_get_financial_statement',
+    'mcp_get_holder_info',
+    'mcp_get_recommendations',
+    'mcp_get_yahoo_finance_news',
+    'backtest',
   ]);
 
   private static isStockAgent(agent: AgentConfig): boolean {
@@ -449,7 +470,17 @@ export class AgentTeam {
   }
 
   private static cleanToolCallTags(s: string): string {
-    return s.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '');
+    return s
+      .replace(/<think>[\s\S]*?<\/think>/g, '')
+      .replace(/<\/?think>/g, '')
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+      .replace(/<\/?tool_call>/g, '')
+      .replace(/<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/g, '')
+      .replace(/<\/?minimax:tool_call>/g, '')
+      .replace(/<minimax:[^>]*>[\s\S]*?<\/minimax:[^>]*>/g, '')
+      .replace(/<\/?minimax:[^>]*>/g, '')
+      .replace(/<invoke[\s\S]*?<\/invoke>/g, '')
+      .replace(/<\/?invoke[^>]*>/g, '');
   }
 
   private async *streamWithFallback(
@@ -465,6 +496,9 @@ export class AgentTeam {
       buf += raw;
       const cleaned = AgentTeam.cleanToolCallTags(buf);
       if (/<tool_call/i.test(buf) && !/<\/tool_call>/i.test(buf)) return;
+      if (/<think/i.test(buf) && !/<\/think>/i.test(buf)) return;
+      if (/<minimax:/i.test(buf) && !/<\/minimax:/i.test(buf)) return;
+      if (/<invoke[\s>]/i.test(buf) && !/<\/invoke>/i.test(buf)) return;
       if (cleaned.trim()) yield cleaned;
       buf = '';
     };
@@ -501,7 +535,12 @@ export class AgentTeam {
         console.warn(`[${agentName}] llmWithTools.stream 失败:`, e);
       }
     }
-    if (buf) { const c = AgentTeam.cleanToolCallTags(buf); if (c.trim()) { text += c; yield c; } buf = ''; }
+    if (buf) {
+      console.log(`[${agentName}] 流式结束 buf 残留 ${buf.length} 字，前120: ${buf.slice(0, 120)}`);
+      const c = AgentTeam.cleanToolCallTags(buf); if (c.trim()) { text += c; yield c; } buf = '';
+    }
+
+    console.log(`[${agentName}] streamWithFallback 文本长度: ${text.trim().length}，前200: ${text.trim().slice(0, 200)}`);
 
     if (!text.trim()) {
       try {
@@ -518,10 +557,12 @@ export class AgentTeam {
       }
     }
 
-    if (!text.trim() && toolResultTexts?.length) {
-      const fallback =
-        `（${agentName} 模型未生成总结，以下为工具原始数据）\n\n` +
-        toolResultTexts.join('\n\n---\n\n');
+    const tooShort = text.trim().length > 0 && text.trim().length < 200;
+    if ((!text.trim() || tooShort) && toolResultTexts?.length) {
+      const label = tooShort
+        ? `\n\n---\n\n（${agentName} 回复过短，以下附上工具原始数据供参考）\n\n`
+        : `（${agentName} 模型未生成总结，以下为工具原始数据）\n\n`;
+      const fallback = label + toolResultTexts.join('\n\n---\n\n');
       yield fallback;
       text += fallback;
     }

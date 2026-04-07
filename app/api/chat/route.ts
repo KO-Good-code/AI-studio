@@ -1,6 +1,6 @@
 import { HumanMessage, AIMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import { allTools } from '@/lib/tools';
-import { createLLM, isZhipuModel, validateModel } from '@/lib/models/factory';
+import { createLLMAsync, isZhipuModel, validateModel } from '@/lib/models/factory';
 import { streamZhipuChatCompletion } from '@/lib/models/zhipu-chat-stream';
 import { formatChatStreamError, mapLlmErrorToResponse } from '@/lib/api/llmErrors';
 import {
@@ -66,7 +66,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const llm = createLLM(model, temperature);
+    const llm = await createLLMAsync(model, temperature);
 
     const zhipuTools = toolsToOpenAiFunctions(allTools);
 
@@ -140,7 +140,11 @@ export async function POST(req: Request) {
 
           if (response.tool_calls && response.tool_calls.length > 0) {
             const cleanContent = typeof response.content === 'string'
-              ? response.content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '')
+              ? response.content
+                  .replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<\/?think>/g, '')
+                  .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '')
+                  .replace(/<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/g, '').replace(/<\/?minimax:[^>]*>/g, '')
+                  .replace(/<invoke[\s\S]*?<\/invoke>/g, '').replace(/<\/?invoke[^>]*>/g, '')
               : response.content;
             const aiMessageWithToolCalls = new AIMessage({
               content: cleanContent,
@@ -194,37 +198,47 @@ export async function POST(req: Request) {
             if (!streamed.trim()) {
               const finalStream = await llmWithTools.stream(messagesWithTools);
               for await (const chunk of finalStream) {
-                const text = streamChunkToText(chunk);
-                if (text) {
-                  streamed += text;
-                  controller.enqueue(encoder.encode(text));
+                const rawText = streamChunkToText(chunk);
+                if (rawText) {
+                  const text = rawText
+                    .replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<\/?think>/g, '')
+                    .replace(/<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/g, '').replace(/<\/?minimax:[^>]*>/g, '')
+                    .replace(/<invoke[\s\S]*?<\/invoke>/g, '').replace(/<\/?invoke[^>]*>/g, '')
+                    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '');
+                  if (text.trim()) {
+                    streamed += text;
+                    controller.enqueue(encoder.encode(text));
+                  }
                 }
               }
             }
 
+            let fallbackContent = '';
             if (!streamed.trim()) {
               console.warn(
                 '[chat] 工具后轮 stream 无正文，改用 invoke 拉取完整回复'
               );
               const finalMsg = await llmWithTools.invoke(messagesWithTools);
-              const fallback = messageContentToText(finalMsg.content);
-              if (fallback.trim()) {
-                controller.enqueue(encoder.encode(fallback));
+              const rawFallback = messageContentToText(finalMsg.content);
+              const cleanFallback = rawFallback
+                .replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<\/?think>/g, '')
+                .replace(/<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/g, '').replace(/<\/?minimax:[^>]*>/g, '')
+                .replace(/<invoke[\s\S]*?<\/invoke>/g, '').replace(/<\/?invoke[^>]*>/g, '')
+                .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').replace(/<\/?tool_call>/g, '')
+                .trim();
+
+              if (cleanFallback) {
+                fallbackContent = cleanFallback;
+                controller.enqueue(encoder.encode(cleanFallback));
               } else if (toolMessages.length > 0) {
-                controller.enqueue(
-                  encoder.encode(
-                    `（模型未生成说明，以下为工具原始结果）\n\n${toolMessages.map((m) => m.content).join('\n\n---\n\n')}`
-                  )
-                );
+                fallbackContent = `（模型未生成说明，以下为工具原始结果）\n\n${toolMessages.map((m) => m.content).join('\n\n---\n\n')}`;
+                controller.enqueue(encoder.encode(fallbackContent));
               } else {
-                controller.enqueue(
-                  encoder.encode(
-                    '（工具已调度但无返回内容，请查看服务端日志或更换模型。）'
-                  )
-                );
+                fallbackContent = '（工具已调度但无返回内容，请查看服务端日志或更换模型。）';
+                controller.enqueue(encoder.encode(fallbackContent));
               }
             }
-            collectedReply = streamed;
+            collectedReply = streamed || fallbackContent;
           } else {
             console.log('[chat] 模型首轮无 tool_calls，尝试流式拿正文');
             let streamedPlain = '';

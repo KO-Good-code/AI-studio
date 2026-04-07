@@ -29,7 +29,16 @@ export type McpStdioConfig = {
   command: string;
   args?: string[];
   cwd?: string;
+  env?: Record<string, string>;
 };
+
+function resolveEnvVars(env: Record<string, string>): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    result[k] = v.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] ?? '');
+  }
+  return result;
+}
 
 export type McpHttpConfig = {
   url: string;
@@ -124,6 +133,9 @@ async function addServersFromArray(
         args: s.args ?? [],
         cwd: s.cwd,
         stderr: 'pipe',
+        env: s.env
+          ? { ...(process.env as Record<string, string>), ...resolveEnvVars(s.env) }
+          : undefined,
       });
       const client = new Client({
         name: `ai-studio-stdio-${sourceLabel}-${idx}`,
@@ -333,6 +345,9 @@ export async function connectMcpStdio(): Promise<McpConnected | null> {
           args: cfg.args ?? [],
           cwd: cfg.cwd,
           stderr: 'pipe',
+          env: cfg.env
+            ? { ...(process.env as Record<string, string>), ...resolveEnvVars(cfg.env) }
+            : undefined,
         });
         const client = new Client({ name: 'ai-studio', version: '0.1.0' });
         await client.connect(transport, mcpRpcOptions());

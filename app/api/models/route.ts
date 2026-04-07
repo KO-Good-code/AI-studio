@@ -1,5 +1,6 @@
-import { AVAILABLE_MODELS, isOllamaModel } from '@/lib/models/types';
+import { AVAILABLE_MODELS, isOllamaModel, setCustomModelConfigs } from '@/lib/models/types';
 import { validateModel } from '@/lib/models/factory';
+import { listCustomModels } from '@/lib/storage/custom-models';
 
 export const runtime = 'nodejs';
 
@@ -7,7 +8,6 @@ export async function GET() {
   try {
     const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
     
-    // 获取 Ollama 本地模型列表
     let ollamaModels: Array<{ name: string; size: number; [k: string]: unknown }> = [];
     try {
       const ac = new AbortController();
@@ -22,20 +22,18 @@ export async function GET() {
       console.warn('无法连接到 Ollama 服务（超时或不可达）');
     }
 
-    // 1. 处理预定义的模型（包括 Ollama 和云端模型）
+    // 1. 预定义模型
     const predefinedModelsWithStatus = await Promise.all(
       AVAILABLE_MODELS.map(async (model) => {
         let available = false;
         let reason = '';
 
         if (isOllamaModel(model.id)) {
-          // Ollama 模型：检查是否已安装
           available = ollamaModels.some((m) => m.name === model.name);
           if (!available) {
             reason = `未安装，运行: ollama pull ${model.name}`;
           }
         } else {
-          // API 模型：检查 API Key
           const validation = await validateModel(model.id);
           available = validation.success;
           reason = validation.error || '';
@@ -52,7 +50,7 @@ export async function GET() {
       })
     );
 
-    // 2. 添加本地安装的其他 Ollama 模型（不在预定义列表中的）
+    // 2. 动态发现的 Ollama 模型
     const predefinedOllamaNames = AVAILABLE_MODELS
       .filter(m => isOllamaModel(m.id))
       .map(m => m.name);
@@ -70,10 +68,36 @@ export async function GET() {
         size: m.size,
       }));
 
-    // 3. 合并所有模型：预定义 + 动态发现的
-    const allModels = [...predefinedModelsWithStatus, ...additionalOllamaModels];
+    // 3. 自定义模型
+    const customModels = await listCustomModels();
+    const customModelItems = customModels.map((cm) => ({
+      id: cm.id,
+      name: cm.name,
+      provider: 'custom' as const,
+      displayName: cm.displayName,
+      description: cm.description || `${cm.providerLabel} · ${cm.baseUrl}`,
+      available: true,
+      reason: '',
+      isCustom: true,
+      providerLabel: cm.providerLabel,
+    }));
 
-    // 返回模型列表
+    setCustomModelConfigs(customModels.map((cm) => ({
+      id: cm.id,
+      name: cm.name,
+      provider: 'custom' as const,
+      displayName: cm.displayName,
+      description: cm.description,
+      maxTokens: cm.maxTokens,
+    })));
+
+    // 4. 合并
+    const allModels = [
+      ...predefinedModelsWithStatus,
+      ...additionalOllamaModels,
+      ...customModelItems,
+    ];
+
     return Response.json({
       success: true,
       models: allModels,

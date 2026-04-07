@@ -22,18 +22,9 @@ interface TradeRecord {
 }
 
 const EMPTY_FORM: Omit<TradeRecord, 'id' | 'createdAt' | 'updatedAt' | 'source'> = {
-  stockName: '',
-  stockCode: '',
-  concept: '',
-  isDragon: false,
-  position: '',
-  tradeDate: '',
-  marketCap: '',
-  price: '',
-  changePercent: '',
-  boardInfo: '',
-  strategy: '',
-  notes: '',
+  stockName: '', stockCode: '', concept: '', isDragon: false,
+  position: '', tradeDate: '', marketCap: '', price: '',
+  changePercent: '', boardInfo: '', strategy: '', notes: '',
 }
 
 function todayStr(): string {
@@ -41,8 +32,34 @@ function todayStr(): string {
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
 }
 
-function formatDateDisplay(d: string): string {
-  if (d.length === 8) return d
+/** 从 notes 字段解析卖出日期、收益率、盈亏金额、出场原因 */
+function parseNotes(notes: string) {
+  const sellDate = notes.match(/卖出[：:]?([\d\-]+)/)?.[1] ?? ''
+  const ret      = notes.match(/收益率[：:]?([+\-\d.]+%)/)?.[1]
+               ?? notes.match(/收益[：:]?([+\-\d.]+%)/)?.[1] ?? ''
+  const pnl      = notes.match(/盈亏[：:]?([+\-\d,]+元)/)?.[1] ?? ''
+  const exit     = notes.match(/出场[：:]?(.+?)(?:\s量比|\s持仓|\|$|$)/)?.[1]?.trim() ?? ''
+  const holdDays = notes.match(/持仓[：:]?(\d+天)/)?.[1] ?? ''
+  return { sellDate, ret, pnl, exit, holdDays }
+}
+
+/** 收益数字 → 颜色 class */
+function retColor(ret: string) {
+  const v = parseFloat(ret)
+  if (isNaN(v)) return 'text-gray-400'
+  return v > 0 ? 'text-red-500 font-bold' : v < 0 ? 'text-green-600 font-bold' : 'text-gray-500'
+}
+
+/** 涨幅数字 → 颜色 class */
+function pctColor(pct: string) {
+  const v = parseFloat(pct)
+  if (isNaN(v)) return 'text-gray-400'
+  return v > 0 ? 'text-red-500' : v < 0 ? 'text-green-600' : 'text-gray-500'
+}
+
+/** YYYYMMDD → YYYY-MM-DD */
+function fmtDate(d: string) {
+  if (d.length === 8) return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
   return d
 }
 
@@ -52,6 +69,7 @@ export default function RecordsPage() {
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState(EMPTY_FORM)
+  const [search, setSearch] = useState('')
 
   const refresh = useCallback(async () => {
     try {
@@ -76,36 +94,27 @@ export default function RecordsPage() {
   const openEdit = (r: TradeRecord) => {
     setEditingId(r.id)
     setForm({
-      stockName: r.stockName,
-      stockCode: r.stockCode,
-      concept: r.concept,
-      isDragon: r.isDragon,
-      position: r.position,
-      tradeDate: r.tradeDate,
-      marketCap: r.marketCap ?? '',
-      price: r.price ?? '',
-      changePercent: r.changePercent,
-      boardInfo: r.boardInfo,
-      strategy: r.strategy,
-      notes: r.notes,
+      stockName: r.stockName, stockCode: r.stockCode, concept: r.concept,
+      isDragon: r.isDragon, position: r.position, tradeDate: r.tradeDate,
+      marketCap: r.marketCap ?? '', price: r.price ?? '',
+      changePercent: r.changePercent, boardInfo: r.boardInfo,
+      strategy: r.strategy, notes: r.notes,
     })
     setShowForm(true)
   }
 
   const save = async () => {
     if (!form.stockName.trim() || !form.stockCode.trim()) return
-    const payload = { ...form, source: 'manual' as const }
+    const payload = { ...form, source: editingId ? undefined : 'manual' as const }
     try {
       if (editingId) {
         await fetch(`/api/trade-records/${editingId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         })
       } else {
         await fetch('/api/trade-records', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         })
       }
@@ -126,130 +135,237 @@ export default function RecordsPage() {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
+  const filtered = records.filter((r) => {
+    if (!search) return true
+    const q = search.toLowerCase()
+    return (
+      r.stockName.toLowerCase().includes(q) ||
+      r.stockCode.toLowerCase().includes(q) ||
+      r.concept.toLowerCase().includes(q)
+    )
+  })
+
+  // 统计摘要（仅 V14 回测记录）
+  const v14Records = filtered.filter(r => r.strategy.includes('V14'))
+  const v14Pnls = v14Records.map(r => {
+    const raw = parseNotes(r.notes).pnl.replace(/[+元,]/g, '')
+    return parseFloat(raw)
+  }).filter(v => !isNaN(v))
+  const v14Rets = v14Records.map(r => parseFloat(parseNotes(r.notes).ret)).filter(v => !isNaN(v))
+  const v14TotalPnl = v14Pnls.reduce((a, b) => a + b, 0)
+  const v14Total = v14Rets.reduce((a, b) => a + b, 0)
+  const v14Wins = v14Pnls.filter(v => v > 0).length
+
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
+      <header className="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-10 shadow-sm">
+        <div className="max-w-screen-xl mx-auto flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <a href="/" className="text-gray-400 hover:text-gray-600 transition-colors text-sm">
-              &larr; 返回
-            </a>
-            <h1 className="text-base font-bold text-gray-800">操作记录</h1>
+            <a href="/" className="text-gray-400 hover:text-gray-600 transition-colors text-sm">← 返回</a>
+            <h1 className="text-base font-bold text-gray-800">交易记录</h1>
+            <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">{filtered.length} 条</span>
           </div>
-          <button
-            onClick={openNew}
-            className="px-3 py-1.5 text-xs bg-red-500 hover:bg-red-600 text-white rounded transition-all font-medium"
-          >
-            + 新增
-          </button>
+          <div className="flex items-center gap-2">
+            <input
+              className="px-3 py-1.5 text-xs bg-gray-100 border border-gray-200 rounded-lg outline-none focus:ring-1 focus:ring-blue-400 w-40"
+              placeholder="搜索股票/概念…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+            <button
+              onClick={openNew}
+              className="px-3 py-1.5 text-xs bg-red-500 hover:bg-red-600 text-white rounded-lg transition-all font-medium whitespace-nowrap"
+            >
+              + 新增
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="max-w-4xl mx-auto px-4 py-4">
-        {/* Table header */}
-        <div className="grid grid-cols-[1fr_auto_auto] gap-x-4 px-3 py-2 text-xs text-gray-400 font-medium border-b border-gray-100">
-          <span>股票(选主线概念)</span>
-          <span className="w-24 text-center">日期</span>
-          <span className="w-28 text-right">涨幅</span>
-        </div>
+      <div className="max-w-screen-xl mx-auto px-4 py-4 space-y-4">
 
-        {loading ? (
-          <p className="text-gray-400 text-center mt-12 text-sm">加载中…</p>
-        ) : records.length === 0 ? (
-          <div className="text-center mt-20 space-y-3">
-            <p className="text-4xl">📋</p>
-            <p className="text-gray-400">暂无操作记录</p>
-            <p className="text-gray-300 text-sm">点击右上角"新增"手动添加，或在 AI 对话中自动生成</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {records.map((r) => (
-              <div
-                key={r.id}
-                className="group grid grid-cols-[1fr_auto_auto] gap-x-4 px-3 py-3 hover:bg-gray-50/80 transition-colors cursor-pointer"
-                onClick={() => openEdit(r)}
-              >
-                {/* === Left Column: Stock Info === */}
-                <div className="min-w-0 space-y-0.5">
-                  {/* Row 1: Name + Dragon + Position */}
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-sm font-bold text-red-600">{r.stockName}</span>
-                    {r.isDragon && (
-                      <span className="px-1 py-px text-[10px] bg-red-500 text-white rounded-sm font-bold leading-tight">
-                        是否龙一
-                      </span>
-                    )}
-                    {r.position && (
-                      <span className="text-xs text-gray-500">仓位:{r.position}</span>
-                    )}
-                  </div>
-                  {/* Row 2: Code + Concept tags + board position desc */}
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-xs text-gray-400 font-mono">{r.stockCode}</span>
-                    {r.concept && r.concept.split(/[,，、+]/).map((tag, idx) => (
-                      <span
-                        key={idx}
-                        className="px-1.5 py-px text-[10px] bg-yellow-400 text-yellow-900 rounded-sm font-medium leading-tight"
-                      >
-                        {tag.trim()}
-                      </span>
-                    ))}
-                    {r.boardInfo && !/^\d/.test(r.boardInfo) && !r.boardInfo.includes('连板') && !r.boardInfo.includes('首板') && !r.boardInfo.includes('断板') && (
-                      <span className="text-[11px] text-gray-400">{r.boardInfo}</span>
-                    )}
-                  </div>
-                  {/* Row 3: Notes (red callout text) */}
-                  {r.notes && (
-                    <p className="text-xs text-red-500 leading-snug">{r.notes}</p>
-                  )}
-
-                  {/* Delete button */}
-                  <div className="opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); remove(r.id) }}
-                      className="text-[10px] text-gray-300 hover:text-red-400 transition-colors"
-                    >
-                      删除
-                    </button>
-                    {r.source === 'ai' && (
-                      <span className="text-[10px] text-gray-300 ml-2">🤖 AI</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* === Middle Column: Date + MarketCap + Price === */}
-                <div className="w-24 text-center space-y-0.5 shrink-0">
-                  <p className="text-sm font-bold text-gray-800">{formatDateDisplay(r.tradeDate)}</p>
-                  {r.marketCap && (
-                    <p className="text-xs text-gray-400">{r.marketCap}亿</p>
-                  )}
-                  {r.price && (
-                    <p className="text-xs text-gray-400">{r.price}元</p>
-                  )}
-                </div>
-
-                {/* === Right Column: Change% + Strategy + BoardInfo === */}
-                <div className="w-28 text-right space-y-0.5 shrink-0">
-                  <p className={`text-sm font-bold ${
-                    parseFloat(r.changePercent) > 0 ? 'text-red-500' :
-                    parseFloat(r.changePercent) < 0 ? 'text-green-600' : 'text-gray-500'
-                  }`}>
-                    {r.changePercent || '--'}
-                  </p>
-                  {r.strategy && (
-                    <p className="text-[11px] text-green-600 leading-snug">{r.strategy}</p>
-                  )}
-                  {r.boardInfo && (
-                    <p className={`text-xs font-medium ${
-                      r.boardInfo.includes('断板') ? 'text-orange-500' : 'text-red-400'
-                    }`}>
-                      {r.boardInfo}
-                    </p>
-                  )}
-                </div>
+        {/* 统计摘要 */}
+        {v14Records.length > 0 && (
+          <div className="grid grid-cols-4 gap-3">
+            {[
+              { label: 'V14 回测笔数', value: String(v14Records.length) + ' 笔', sub: '初始10万 每仓2万' },
+              { label: '总盈亏（元）', value: (v14TotalPnl >= 0 ? '+' : '') + v14TotalPnl.toLocaleString('zh-CN') + ' 元', sub: `最终 ${(100000 + v14TotalPnl).toLocaleString('zh-CN')} 元`, color: v14TotalPnl >= 0 ? 'text-red-500' : 'text-green-600' },
+              { label: '胜率', value: v14Pnls.length ? (v14Wins / v14Pnls.length * 100).toFixed(0) + '%' : '--', sub: `${v14Wins}盈 / ${v14Pnls.length - v14Wins}亏` },
+              { label: '平均单笔盈亏', value: v14Pnls.length ? (v14TotalPnl / v14Pnls.length >= 0 ? '+' : '') + Math.round(v14TotalPnl / v14Pnls.length).toLocaleString('zh-CN') + ' 元' : '--', sub: '等权平均', color: v14TotalPnl / v14Pnls.length >= 0 ? 'text-red-500' : 'text-green-600' },
+            ].map(s => (
+              <div key={s.label} className="bg-white rounded-xl border border-gray-100 px-4 py-3 shadow-sm">
+                <p className="text-xs text-gray-400">{s.label}</p>
+                <p className={`text-xl font-bold mt-0.5 ${s.color ?? 'text-gray-800'}`}>{s.value}</p>
+                <p className="text-[11px] text-gray-300 mt-0.5">{s.sub}</p>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Table */}
+        {loading ? (
+          <p className="text-gray-400 text-center py-20 text-sm">加载中…</p>
+        ) : filtered.length === 0 ? (
+          <div className="text-center py-20 space-y-2">
+            <p className="text-4xl">📋</p>
+            <p className="text-gray-400">暂无记录</p>
+          </div>
+        ) : (
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 font-medium">
+                    <th className="px-4 py-3 text-left whitespace-nowrap">#</th>
+                    <th className="px-4 py-3 text-left whitespace-nowrap">股票</th>
+                    <th className="px-4 py-3 text-left whitespace-nowrap">行业概念</th>
+                    <th className="px-4 py-3 text-center whitespace-nowrap">买入日</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">买入价</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">当日涨幅</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">市值</th>
+                    <th className="px-4 py-3 text-center whitespace-nowrap">仓位</th>
+                    <th className="px-4 py-3 text-center whitespace-nowrap">卖出日</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">收益</th>
+                    <th className="px-4 py-3 text-left whitespace-nowrap">出场方式</th>
+                    <th className="px-4 py-3 text-center whitespace-nowrap">来源</th>
+                    <th className="px-4 py-3 text-center whitespace-nowrap">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {filtered.map((r, idx) => {
+                    const { sellDate, ret, pnl, exit, holdDays } = parseNotes(r.notes)
+                    const isV14 = r.strategy.includes('V14')
+                    return (
+                      <tr
+                        key={r.id}
+                        className="hover:bg-blue-50/40 transition-colors group"
+                      >
+                        {/* # */}
+                        <td className="px-4 py-3 text-gray-300 text-xs">{idx + 1}</td>
+
+                        {/* 股票 */}
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-gray-800">{r.stockName}</span>
+                            {r.isDragon && (
+                              <span className="px-1 py-px text-[9px] bg-red-500 text-white rounded font-bold">龙</span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-gray-400 font-mono mt-0.5">{r.stockCode}</p>
+                        </td>
+
+                        {/* 行业概念 */}
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-1 max-w-[140px]">
+                            {r.concept ? r.concept.split(/[,，、+]/).map((tag, i) => (
+                              <span key={i} className="px-1.5 py-px text-[10px] bg-amber-100 text-amber-800 rounded font-medium">
+                                {tag.trim()}
+                              </span>
+                            )) : <span className="text-gray-300 text-xs">—</span>}
+                          </div>
+                        </td>
+
+                        {/* 买入日 */}
+                        <td className="px-4 py-3 text-center whitespace-nowrap">
+                          <span className="text-gray-700 text-xs font-mono">{fmtDate(r.tradeDate)}</span>
+                        </td>
+
+                        {/* 买入价 */}
+                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                          <span className="text-gray-700">{r.price ? `${r.price}元` : '—'}</span>
+                        </td>
+
+                        {/* 当日涨幅 */}
+                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                          <span className={pctColor(r.changePercent)}>
+                            {r.changePercent || '—'}
+                          </span>
+                        </td>
+
+                        {/* 市值 */}
+                        <td className="px-4 py-3 text-right whitespace-nowrap text-xs text-gray-400">
+                          {r.marketCap || '—'}
+                        </td>
+
+                        {/* 仓位 */}
+                        <td className="px-4 py-3 text-center whitespace-nowrap">
+                          <span className="text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">
+                            {r.position || '—'}
+                          </span>
+                        </td>
+
+                        {/* 卖出日 */}
+                        <td className="px-4 py-3 text-center whitespace-nowrap">
+                          {sellDate ? (
+                            <span className="text-xs font-mono text-gray-500">{sellDate}</span>
+                          ) : (
+                            <span className="text-gray-300 text-xs">持仓中</span>
+                          )}
+                        </td>
+
+                        {/* 收益 */}
+                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                          {pnl ? (
+                            <div>
+                              <p className={`text-sm font-bold ${retColor(pnl)}`}>{pnl}</p>
+                              {ret && <p className={`text-xs ${retColor(ret)}`}>{ret}</p>}
+                            </div>
+                          ) : ret ? (
+                            <span className={`text-sm ${retColor(ret)}`}>{ret}</span>
+                          ) : (
+                            <span className="text-gray-300">—</span>
+                          )}
+                        </td>
+
+                        {/* 出场方式 */}
+                        <td className="px-4 py-3 max-w-[200px]">
+                          {exit ? (
+                            <div>
+                              <span className="text-[11px] text-gray-500 leading-snug">{exit}</span>
+                              {holdDays && <span className="ml-1 text-[10px] text-gray-300">({holdDays})</span>}
+                            </div>
+                          ) : r.boardInfo ? (
+                            <span className="text-[11px] text-orange-500">{r.boardInfo}</span>
+                          ) : (
+                            <span className="text-gray-300 text-xs">—</span>
+                          )}
+                        </td>
+
+                        {/* 来源 */}
+                        <td className="px-4 py-3 text-center whitespace-nowrap">
+                          {r.source === 'ai' ? (
+                            <span className="text-[11px] text-blue-400 bg-blue-50 px-1.5 py-0.5 rounded">
+                              {isV14 ? 'V14回测' : '🤖 AI'}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">手动</span>
+                          )}
+                        </td>
+
+                        {/* 操作 */}
+                        <td className="px-4 py-3 text-center whitespace-nowrap">
+                          <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => openEdit(r)}
+                              className="text-[11px] text-blue-400 hover:text-blue-600 transition-colors"
+                            >
+                              编辑
+                            </button>
+                            <button
+                              onClick={() => remove(r.id)}
+                              className="text-[11px] text-gray-300 hover:text-red-400 transition-colors"
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
@@ -257,159 +373,114 @@ export default function RecordsPage() {
       {/* Modal Form */}
       {showForm && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowForm(false)}>
-          <div className="bg-white border border-gray-200 rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="p-5 border-b border-gray-100">
               <h3 className="text-base font-bold text-gray-800">
-                {editingId ? '编辑记录' : '新增操作记录'}
+                {editingId ? '编辑记录' : '新增交易记录'}
               </h3>
             </div>
             <div className="p-5 space-y-4">
-              {/* Stock name + code */}
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">股票名称 *</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.stockName}
-                    onChange={(e) => updateField('stockName', e.target.value)}
-                    placeholder="如：华电辽能"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">股票代码 *</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.stockCode}
-                    onChange={(e) => updateField('stockCode', e.target.value)}
-                    placeholder="如：600396"
-                  />
-                </div>
+                {[
+                  { label: '股票名称 *', key: 'stockName' as const, placeholder: '如：华电辽能' },
+                  { label: '股票代码 *', key: 'stockCode' as const, placeholder: '如：600396' },
+                ].map(f => (
+                  <div key={f.key}>
+                    <label className="block text-xs text-gray-400 mb-1">{f.label}</label>
+                    <input
+                      className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
+                      value={form[f.key] as string}
+                      onChange={e => updateField(f.key, e.target.value)}
+                      placeholder={f.placeholder}
+                    />
+                  </div>
+                ))}
               </div>
 
-              {/* Concept + Position */}
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">主线概念</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.concept}
-                    onChange={(e) => updateField('concept', e.target.value)}
-                    placeholder="如：电力+氢能"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">仓位</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.position}
-                    onChange={(e) => updateField('position', e.target.value)}
-                    placeholder="如：必须满仓、1/2仓、1w"
-                  />
-                </div>
+                {[
+                  { label: '行业概念', key: 'concept' as const, placeholder: '如：电力+氢能' },
+                  { label: '仓位', key: 'position' as const, placeholder: '如：20%、1/2仓' },
+                ].map(f => (
+                  <div key={f.key}>
+                    <label className="block text-xs text-gray-400 mb-1">{f.label}</label>
+                    <input
+                      className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
+                      value={form[f.key] as string}
+                      onChange={e => updateField(f.key, e.target.value)}
+                      placeholder={f.placeholder}
+                    />
+                  </div>
+                ))}
               </div>
 
               <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="isDragon"
-                  checked={form.isDragon}
-                  onChange={(e) => updateField('isDragon', e.target.checked)}
-                  className="w-4 h-4 accent-red-500"
-                />
-                <label htmlFor="isDragon" className="text-sm text-gray-600">龙一标识</label>
+                <input type="checkbox" id="isDragon" checked={form.isDragon}
+                  onChange={e => updateField('isDragon', e.target.checked)}
+                  className="w-4 h-4 accent-red-500" />
+                <label htmlFor="isDragon" className="text-sm text-gray-600">标记为龙头</label>
               </div>
 
-              {/* Date + Change + Board */}
               <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">日期</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.tradeDate}
-                    onChange={(e) => updateField('tradeDate', e.target.value)}
-                    placeholder="20260325"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">涨幅</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.changePercent}
-                    onChange={(e) => updateField('changePercent', e.target.value)}
-                    placeholder="如：10.00%"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">连板</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.boardInfo}
-                    onChange={(e) => updateField('boardInfo', e.target.value)}
-                    placeholder="如：首板、2连板"
-                  />
-                </div>
+                {[
+                  { label: '买入日期', key: 'tradeDate' as const, placeholder: '20260325' },
+                  { label: '买入涨幅', key: 'changePercent' as const, placeholder: '+4.5%' },
+                  { label: '出场/连板', key: 'boardInfo' as const, placeholder: '追踪止损/首板' },
+                ].map(f => (
+                  <div key={f.key}>
+                    <label className="block text-xs text-gray-400 mb-1">{f.label}</label>
+                    <input
+                      className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
+                      value={form[f.key] as string}
+                      onChange={e => updateField(f.key, e.target.value)}
+                      placeholder={f.placeholder}
+                    />
+                  </div>
+                ))}
               </div>
 
-              {/* Market cap + Price */}
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">市值(亿)</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.marketCap}
-                    onChange={(e) => updateField('marketCap', e.target.value)}
-                    placeholder="如：127"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">股价(元)</label>
-                  <input
-                    className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
-                    value={form.price}
-                    onChange={(e) => updateField('price', e.target.value)}
-                    placeholder="如：5.28"
-                  />
-                </div>
+                {[
+                  { label: '市值', key: 'marketCap' as const, placeholder: '~92亿' },
+                  { label: '股价(元)', key: 'price' as const, placeholder: '12.78' },
+                ].map(f => (
+                  <div key={f.key}>
+                    <label className="block text-xs text-gray-400 mb-1">{f.label}</label>
+                    <input
+                      className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400"
+                      value={form[f.key] as string}
+                      onChange={e => updateField(f.key, e.target.value)}
+                      placeholder={f.placeholder}
+                    />
+                  </div>
+                ))}
               </div>
 
-              {/* Strategy */}
               <div>
-                <label className="block text-xs text-gray-400 mb-1">策略（右侧绿字）</label>
-                <textarea
-                  className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400 resize-none"
-                  rows={2}
-                  value={form.strategy}
-                  onChange={(e) => updateField('strategy', e.target.value)}
-                  placeholder="如：涨停,不能直接排板,只打回封"
-                />
+                <label className="block text-xs text-gray-400 mb-1">策略描述</label>
+                <textarea className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-1 focus:ring-red-400 resize-none"
+                  rows={2} value={form.strategy}
+                  onChange={e => updateField('strategy', e.target.value)}
+                  placeholder="如：V14策略 / 追板策略" />
               </div>
 
-              {/* Notes */}
               <div>
-                <label className="block text-xs text-gray-400 mb-1">补充说明（左侧红字）</label>
-                <textarea
-                  className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-800 outline-none focus:ring-1 focus:ring-red-400 focus:border-red-400 resize-none"
-                  rows={2}
-                  value={form.notes}
-                  onChange={(e) => updateField('notes', e.target.value)}
-                  placeholder="如：大妖股,必须满仓梭哈,能吃3个板"
-                />
+                <label className="block text-xs text-gray-400 mb-1">备注（卖出信息/补充说明）</label>
+                <textarea className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-1 focus:ring-red-400 resize-none"
+                  rows={3} value={form.notes}
+                  onChange={e => updateField('notes', e.target.value)}
+                  placeholder="买入:2026-01-05 卖出:2026-01-13 收益:+6.38% 出场:追踪止损" />
               </div>
             </div>
 
-            {/* Footer */}
             <div className="p-5 border-t border-gray-100 flex justify-end gap-3">
-              <button
-                onClick={() => setShowForm(false)}
-                className="px-4 py-2 text-sm text-gray-400 hover:text-gray-600 transition-colors"
-              >
+              <button onClick={() => setShowForm(false)}
+                className="px-4 py-2 text-sm text-gray-400 hover:text-gray-600 transition-colors">
                 取消
               </button>
-              <button
-                onClick={save}
+              <button onClick={save}
                 disabled={!form.stockName.trim() || !form.stockCode.trim()}
-                className="px-4 py-2 text-sm bg-red-500 hover:bg-red-600 text-white rounded-lg disabled:opacity-30 transition-all font-medium"
-              >
+                className="px-4 py-2 text-sm bg-red-500 hover:bg-red-600 text-white rounded-lg disabled:opacity-30 transition-all font-medium">
                 {editingId ? '保存修改' : '添加记录'}
               </button>
             </div>

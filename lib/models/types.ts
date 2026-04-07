@@ -6,7 +6,7 @@
  * （仅收录适用于对话补全 /chat/completions 的文本模型；图像/视频/向量等请走对应 API）
  */
 
-export type ModelProvider = 'ollama' | 'zhipu';
+export type ModelProvider = 'ollama' | 'zhipu' | 'custom';
 
 export interface ModelConfig {
   id: string;
@@ -137,15 +137,36 @@ export const AVAILABLE_MODELS: ModelConfig[] = [
   ...ZHIPU_TEXT_MODELS,
 ];
 
+/** 运行时注入的自定义模型（由 factory.ts 在加载时填入） */
+let _customModelConfigs: ModelConfig[] = [];
+
+export function setCustomModelConfigs(configs: ModelConfig[]): void {
+  _customModelConfigs = configs;
+}
+
+export function getCustomModelConfigs(): ModelConfig[] {
+  return _customModelConfigs;
+}
+
 /**
  * 根据 ID 获取模型配置
- * 如果是动态 Ollama 模型（不在预定义列表中），返回基本配置
+ * 查找顺序：预定义 → 自定义 → 回退为 Ollama
  */
 export function getModelConfig(modelId: string): ModelConfig | undefined {
   const predefined = AVAILABLE_MODELS.find((m) => m.id === modelId);
+  if (predefined) return predefined;
 
-  if (predefined) {
-    return predefined;
+  const custom = _customModelConfigs.find((m) => m.id === modelId);
+  if (custom) return custom;
+
+  if (modelId.startsWith('custom-')) {
+    return {
+      id: modelId,
+      name: modelId,
+      provider: 'custom' as ModelProvider,
+      displayName: modelId,
+      description: '自定义模型',
+    };
   }
 
   return {

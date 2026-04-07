@@ -793,6 +793,15 @@ export default function Home() {
                 )}
               </select>
 
+              <a
+                href="/models"
+                target="_blank"
+                className="px-2 py-1 text-xs bg-gray-800 text-gray-400 hover:text-indigo-300 hover:bg-gray-700 rounded-md transition-all"
+                title="模型管理"
+              >
+                +
+              </a>
+
               <button
                 onClick={clearChat}
                 disabled={isLoading || messages.length === 0}
